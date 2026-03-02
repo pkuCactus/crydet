@@ -4,7 +4,7 @@ Defines configuration dataclasses for feature extraction and data loading
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional
 
 
 @dataclass
@@ -28,6 +28,7 @@ class FeatureConfig:
 
 @dataclass
 class DatasetConfig:
+    audio_suffixes: tuple = ('.wav', '.mp3', '.flac')
     sample_rate: int = 16000
     duration: float = 10.0
     stride: float = 1
