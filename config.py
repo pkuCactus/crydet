@@ -37,3 +37,18 @@ class DatasetConfig:
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
     feature: FeatureConfig = field(default_factory=FeatureConfig)
 
+
+@dataclass
+class TrainingConfig:
+    batch_size: int = 32
+    num_workers: int = 4
+    pin_memory: bool = True
+    num_epochs: int = 100
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-5
+    grad_clip: Optional[float] = None
+    early_stopping_patience: Optional[int] = 10
+    checkpoint_dir: str = './checkpoints'
+    log_dir: str = './logs'
+    use_augmentation: bool = True
+
