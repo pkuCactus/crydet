@@ -52,4 +52,3 @@ class TrainingConfig:
     checkpoint_dir: str = './checkpoints'
     log_dir: str = './logs'
     use_augmentation: bool = True
-
