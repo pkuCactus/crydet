@@ -37,7 +37,8 @@ class CryDataset(Dataset):
 
         # 构建文件调度字典
         self.file_schedule_dict = self._get_schedule_dict(data_dict)
-        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry']
+        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
+                              for _ in range(self.data_dict[label][0])]
         self._num_samples = {label: len(schedules) for label, schedules in self.file_schedule_dict.items()}
 
     def __getitem__(self, index: tuple[str, int]):
@@ -55,7 +56,8 @@ class CryDataset(Dataset):
     def generate_schedule(self):
         """Regenerate file schedules for the next epoch"""
         self.file_schedule_dict = self._get_schedule_dict(self.data_dict)
-        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry']
+        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
+                              for _ in range(self.data_dict[label][0])]
         self._num_samples = {label: len(schedules) for label, schedules in self.file_schedule_dict.items()}
 
     def shuffle(self):
