@@ -14,7 +14,7 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 from .audio_reader import AudioReader
 from config import DatasetConfig
 
-MIN_DURATION = 0.02  # Minimum duration of audio files to consider (in seconds)
+MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
 LOGGER = logging.getLogger(__name__)
 
 
