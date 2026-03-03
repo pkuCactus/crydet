@@ -1,115 +1,73 @@
 """
 数据读取示例
-演示如何使用 AudioReader、CryDataset 和 CrySampler
+演示如何从 audio_list/sample.json 和 configs/default.yaml 构建 DataLoader
 """
 
 import sys
 sys.path.insert(0, '..')
 
+import json
 from pathlib import Path
-from dataset.audio_reader import AudioReader
+import torch
+from torch.utils.data import DataLoader
+
 from dataset.dataset import CryDataset
 from dataset.sampler import CrySampler
-from torch.utils.data import DataLoader
-from config import DatasetConfig, load_config
+from config import load_config
 
 
-def example_audio_reader():
-    """示例1: 使用 AudioReader 读取音频文件"""
-    print("=" * 60)
-    print("示例1: AudioReader 基本使用")
-    print("=" * 60)
+def load_audio_list(json_path: str) -> dict:
+    """
+    从 JSON 文件加载音频目录列表
 
-    # 创建 AudioReader
-    reader = AudioReader(
-        target_sr=16000,
-        cache_dir='./audio_cache',
-        use_cache=True,
-        force_mono=True
-    )
-    print(f"AudioReader: {reader}")
+    Args:
+        json_path: JSON 文件路径
 
-    # 假设有一个音频文件
-    audio_file = 'data/audio/cry/sample.wav'
+    Returns:
+        数据目录字典 {label: [dir1, dir2, ...]}
+    """
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
 
-    if Path(audio_file).exists():
-        # 1. 加载整个音频
-        waveform, sr = reader.load(audio_file)
-        print(f"完整加载: shape={waveform.shape}, sr={sr}")
+    data_dict = {}
+    for label, value in data.items():
+        if isinstance(value, list):
+            if isinstance(value[0], int):
+                # 格式: [weight, directory] -> 提取目录
+                data_dict[label] = [value[1]]
+            else:
+                # 格式: [directory1, directory2, ...]
+                data_dict[label] = value
+        else:
+            data_dict[label] = [value]
 
-        # 2. 按采样点加载部分音频
-        waveform_part, _ = reader.load(audio_file, start=16000, stop=32000)
-        print(f"部分加载 (1-2秒): shape={waveform_part.shape}")
-
-        # 3. 按时间加载部分音频
-        waveform_time, _ = reader.load_by_time(audio_file, start_time=5.0, end_time=10.0)
-        print(f"时间加载 (5-10秒): shape={waveform_time.shape}")
-
-        # 4. 查看缓存信息
-        cache_info = reader.get_cache_info()
-        print(f"缓存信息: {cache_info}")
-    else:
-        print(f"音频文件不存在: {audio_file}")
+    return data_dict
 
 
-def example_dataset():
-    """示例2: 使用 CryDataset 加载数据集"""
-    print("\n" + "=" * 60)
-    print("示例2: CryDataset 数据集使用")
-    print("=" * 60)
+def create_dataloader_from_config(
+    audio_list_path: str,
+    config_path: str
+) -> DataLoader:
+    """
+    从配置文件和数据列表创建 DataLoader
 
-    # 配置
-    config = DatasetConfig(
-        sample_rate=16000,
-        duration=10.0,
-        stride=1.0,
-        cry_rate=0.5,
-        cache_dir='./audio_cache',
-        use_cache=True
-    )
+    Args:
+        audio_list_path: 音频列表 JSON 文件路径
+        config_path: 配置文件路径
 
-    # 数据目录字典
-    # 格式: {label: [directory1, directory2, ...]}
-    # non-cry 类别会跳过第一个目录（用于数据平衡）
-    data_dict = {
-        'cry': ['data/audio/cry'],
-        'non_cry': ['data/audio/non_cry_backup', 'data/audio/non_cry'],
-    }
-
-    # 创建数据集
-    dataset = CryDataset(data_dict, config)
-
-    print(f"数据集长度: {len(dataset)}")
-    print(f"类别: {list(dataset.file_schedule_dict.keys())}")
-    print(f"各类别样本数: {dataset.num_samples}")
-
-    # 获取单个样本
-    if len(dataset) > 0:
-        # 索引格式: (label, file_idx)
-        index = ('cry', 0)
-        waveform, label = dataset[index]
-        print(f"样本 shape: {waveform.shape}, label: {label}")
-
-
-def example_dataloader():
-    """示例3: 使用 DataLoader 和 CrySampler"""
-    print("\n" + "=" * 60)
-    print("示例3: DataLoader + CrySampler")
-    print("=" * 60)
-
+    Returns:
+        DataLoader 实例
+    """
     # 加载配置
-    config = load_config('configs/default.yaml')
+    config = load_config(config_path)
 
-    # 数据目录
-    data_dict = {
-        'cry': ['data/audio/cry'],
-        'non_cry': ['data/audio/non_cry'],
-    }
+    # 加载音频目录列表
+    data_dict = load_audio_list(audio_list_path)
 
     # 创建数据集
     dataset = CryDataset(data_dict, config.dataset)
 
-    # 创建采样器 (控制 cry/non_cry 比例)
+    # 创建采样器
     sampler = CrySampler(
         data_source=dataset,
         cry_rate=config.dataset.cry_rate,
@@ -125,70 +83,122 @@ def example_dataloader():
         pin_memory=config.training.pin_memory
     )
 
-    print(f"DataLoader batches: {len(dataloader)}")
+    return dataloader, dataset, config
 
-    # 遍历数据
+
+def main():
+    """主函数：演示完整的数据加载流程"""
+    print("=" * 70)
+    print("婴儿哭声检测数据加载示例")
+    print("=" * 70)
+
+    # 路径配置
+    audio_list_path = 'audio_list/sample.json'
+    config_path = 'configs/default.yaml'
+
+    # 检查文件是否存在
+    if not Path(audio_list_path).exists():
+        print(f"错误: 音频列表文件不存在: {audio_list_path}")
+        print("请创建 audio_list/sample.json 文件")
+        return
+
+    if not Path(config_path).exists():
+        print(f"错误: 配置文件不存在: {config_path}")
+        return
+
+    # 1. 加载配置
+    print("\n[1] 加载配置文件")
+    config = load_config(config_path)
+    print(f"    配置文件: {config_path}")
+    print(f"    采样率: {config.dataset.sample_rate} Hz")
+    print(f"    片段时长: {config.dataset.duration} 秒")
+    print(f"    Cry 比例: {config.dataset.cry_rate}")
+    print(f"    批大小: {config.training.batch_size}")
+
+    # 2. 加载音频目录列表
+    print("\n[2] 加载音频目录列表")
+    data_dict = load_audio_list(audio_list_path)
+    print(f"    音频列表: {audio_list_path}")
+    for label, dirs in data_dict.items():
+        print(f"    - {label}: {dirs}")
+
+    # 3. 创建数据集
+    print("\n[3] 创建数据集")
+    dataset = CryDataset(data_dict, config.dataset)
+    print(f"    数据集长度: {len(dataset)}")
+    print(f"    类别样本数: {dataset.num_samples}")
+
+    # 4. 创建采样器和 DataLoader
+    print("\n[4] 创建 DataLoader")
+    sampler = CrySampler(
+        data_source=dataset,
+        cry_rate=config.dataset.cry_rate,
+        shuffle=True
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config.training.batch_size,
+        sampler=sampler,
+        num_workers=config.training.num_workers,
+        pin_memory=config.training.pin_memory
+    )
+    print(f"    批次数: {len(dataloader)}")
+    print(f"    采样器: CrySampler(cry_rate={config.dataset.cry_rate})")
+
+    # 5. 遍历数据
+    print("\n[5] 遍历数据批次")
     for batch_idx, (waveforms, labels) in enumerate(dataloader):
-        print(f"Batch {batch_idx}: waveforms shape={waveforms.shape}, labels={labels[:5]}...")
+        print(f"\n    Batch {batch_idx + 1}:")
+        print(f"      - 波形形状: {waveforms.shape}")
+        print(f"      - 标签: {labels[:5].tolist()}... (共 {len(labels)} 个)")
+
+        # 统计标签分布
+        unique_labels = torch.unique(labels)
+        for label in unique_labels:
+            count = (labels == label).sum().item()
+            print(f"      - {label}: {count} 个样本")
+
+        # 只展示前3个批次
         if batch_idx >= 2:
+            print("\n    ... (仅展示前3个批次)")
             break
 
+    # 6. 缓存信息
+    print("\n[6] 音频缓存信息")
+    cache_info = dataset.audio_reader.get_cache_info()
+    print(f"    缓存启用: {cache_info['enabled']}")
+    print(f"    缓存目录: {cache_info['cache_dir']}")
+    print(f"    缓存文件数: {cache_info['file_count']}")
+    print(f"    缓存大小: {cache_info['total_size_mb']} MB")
 
-def example_from_config():
-    """示例4: 从配置文件加载"""
-    print("\n" + "=" * 60)
-    print("示例4: 从配置文件加载")
-    print("=" * 60)
-
-    # 加载配置
-    config = load_config('configs/default.yaml')
-
-    print(f"特征配置:")
-    print(f"  - feature_type: {config.feature.feature_type}")
-    print(f"  - n_mels: {config.feature.n_mels}")
-    print(f"  - n_fft: {config.feature.n_fft}")
-
-    print(f"\n数据集配置:")
-    print(f"  - sample_rate: {config.dataset.sample_rate}")
-    print(f"  - duration: {config.dataset.duration}")
-    print(f"  - cry_rate: {config.dataset.cry_rate}")
-    print(f"  - cache_dir: {config.dataset.cache_dir}")
-
-    print(f"\n训练配置:")
-    print(f"  - batch_size: {config.training.batch_size}")
-    print(f"  - learning_rate: {config.training.learning_rate}")
-    print(f"  - num_epochs: {config.training.num_epochs}")
+    print("\n" + "=" * 70)
+    print("数据加载示例完成")
+    print("=" * 70)
 
 
-def example_cache_management():
-    """示例5: 缓存管理"""
-    print("\n" + "=" * 60)
-    print("示例5: 缓存管理")
-    print("=" * 60)
+def example_single_sample():
+    """示例：获取单个样本"""
+    audio_list_path = 'audio_list/sample.json'
+    config_path = 'configs/default.yaml'
 
-    reader = AudioReader(
-        target_sr=16000,
-        cache_dir='./audio_cache',
-        use_cache=True
-    )
+    if not Path(audio_list_path).exists() or not Path(config_path).exists():
+        print("配置文件不存在，跳过单个样本示例")
+        return
 
-    # 查看缓存信息
-    info = reader.get_cache_info()
-    print(f"缓存状态:")
-    print(f"  - 启用: {info['enabled']}")
-    print(f"  - 目录: {info['cache_dir']}")
-    print(f"  - 文件数: {info['file_count']}")
-    print(f"  - 大小: {info['total_size_mb']} MB")
+    config = load_config(config_path)
+    data_dict = load_audio_list(audio_list_path)
+    dataset = CryDataset(data_dict, config.dataset)
 
-    # 清除缓存
-    # deleted = reader.clear_cache()
-    # print(f"已删除 {deleted} 个缓存文件")
+    if len(dataset) > 0:
+        print("\n获取单个样本:")
+        # 获取 cry 类别的第一个样本
+        if 'cry' in dataset.file_schedule_dict and len(dataset.file_schedule_dict['cry']) > 0:
+            waveform, label = dataset[('cry', 0)]
+            print(f"  波形形状: {waveform.shape}")
+            print(f"  波形时长: {len(waveform) / config.dataset.sample_rate:.2f} 秒")
+            print(f"  标签: {label}")
 
 
 if __name__ == '__main__':
-    # 运行所有示例
-    example_audio_reader()
-    example_dataset()
-    example_dataloader()
-    example_from_config()
-    example_cache_management()
+    main()
+    example_single_sample()
