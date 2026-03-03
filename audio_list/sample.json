@@ -1,0 +1,13 @@
+{
+    "cry": [
+        "data/audio/cry"
+    ],
+    "animal_world": [
+        10,
+        "data/audio/animal_world"
+    ],
+    "news": [
+        5,
+        "data/audio/news/"
+    ]
+}
