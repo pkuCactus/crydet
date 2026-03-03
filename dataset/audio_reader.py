@@ -1,5 +1,6 @@
 """
 Audio Reader for Cry Detection Dataset
+Supports partial reading and caching of resampled audio as WAV files
 """
 
 import json
@@ -15,10 +16,15 @@ class AudioReader:
     """
     Audio file reader with resampling and caching support
 
+    Caches resampled audio as WAV files to support partial reading.
+    Files with matching sample rate are read directly without caching.
+
     Example:
         reader = AudioReader(target_sr=16000, cache_dir='.cache/audio')
+        # Load entire audio
         waveform, sr = reader.load('audio.wav')
-        batch, sr = reader.load_batch(['audio1.wav', 'audio2.wav'])
+        # Load partial audio (from sample 1000 to 5000)
+        waveform, sr = reader.load('audio.wav', start=1000, stop=5000)
     """
 
     def __init__(
@@ -33,7 +39,7 @@ class AudioReader:
 
         Args:
             target_sr: Target sample rate (default: 16000)
-            cache_dir: Directory to cache resampled audio (default: None)
+            cache_dir: Directory to cache resampled audio as WAV (default: None)
             use_cache: Whether to use cache (default: True)
             force_mono: Convert stereo to mono (default: True)
         """
@@ -46,51 +52,91 @@ class AudioReader:
         if self.use_cache and self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def load(self, file_path: Union[str, Path]) -> Tuple[np.ndarray, int]:
+    def load(
+        self,
+        file_path: Union[str, Path],
+        start: int = 0,
+        stop: Optional[int] = None
+    ) -> Tuple[np.ndarray, int]:
         """
         Load audio file with resampling and caching
 
-        Only caches files that need resampling.
-        Files with matching sample rate are read directly for best performance.
+        - Files with matching sample rate: read directly without caching
+        - Files needing resampling: resample entire audio, cache as WAV,
+          then support partial reading from cache
 
         Args:
             file_path: Path to audio file
+            start: Start sample index (default: 0)
+            stop: End sample index, exclusive (default: None = end of file)
 
         Returns:
             Tuple of (waveform, sample_rate)
         """
         file_path = Path(file_path)
 
-        # Get audio info first to check sample rate
+        # Get audio info to check sample rate
         info = sf.info(str(file_path))
         orig_sr = info.samplerate
 
         # Fast path: sample rate matches, read directly without caching
         if orig_sr == self.target_sr:
-            waveform = sf.read(file_path, dtype='float32')[0]
+            waveform = sf.read(file_path, dtype='float32', start=start, stop=stop)[0]
             if self.force_mono and waveform.ndim > 1:
                 waveform = np.mean(waveform, axis=1)
             return waveform, self.target_sr
 
-        # Slow path: need resampling, use cache
-        if self.use_cache and self.cache_dir:
-            cached = self._load_from_cache(file_path)
-            if cached is not None:
-                return cached, self.target_sr
+        # Slow path: need resampling
+        cache_path = self._get_cache_path(file_path, orig_sr)
 
-        # Load and resample
+        # Check if cached WAV exists
+        if self.use_cache and self.cache_dir and cache_path.exists():
+            # Read from cached WAV with partial support
+            waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
+            if self.force_mono and waveform.ndim > 1:
+                waveform = np.mean(waveform, axis=1)
+            return waveform, self.target_sr
+
+        # Load entire audio, resample, and cache
         waveform, _ = sf.read(file_path, dtype='float32')
 
         if self.force_mono and waveform.ndim > 1:
             waveform = np.mean(waveform, axis=1)
 
+        # Resample entire audio
         waveform = self._resample(waveform, orig_sr, self.target_sr)
 
-        # Cache only resampled files
+        # Save as WAV for partial reading support
         if self.use_cache and self.cache_dir:
-            self._save_to_cache(file_path, waveform, orig_sr)
+            self._save_to_cache(cache_path, waveform, file_path, orig_sr)
+            # Now read partial from cache
+            if start != 0 or stop is not None:
+                waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
+                if self.force_mono and waveform.ndim > 1:
+                    waveform = np.mean(waveform, axis=1)
 
         return waveform, self.target_sr
+
+    def load_by_time(
+        self,
+        file_path: Union[str, Path],
+        start_time: float = 0.0,
+        end_time: Optional[float] = None
+    ) -> Tuple[np.ndarray, int]:
+        """
+        Load audio segment by time (in seconds)
+
+        Args:
+            file_path: Path to audio file
+            start_time: Start time in seconds (default: 0.0)
+            end_time: End time in seconds (default: None = end of file)
+
+        Returns:
+            Tuple of (waveform, sample_rate)
+        """
+        start_sample = int(start_time * self.target_sr)
+        stop_sample = int(end_time * self.target_sr) if end_time is not None else None
+        return self.load(file_path, start=start_sample, stop=stop_sample)
 
     def load_batch(
         self,
@@ -155,46 +201,30 @@ class AudioReader:
         return hasher.hexdigest()
 
     def _get_cache_path(self, file_path: Path, orig_sr: int) -> Path:
-        """Get cache file path for resampled audio"""
+        """Get cache file path for resampled audio (WAV format)"""
         audio_hash = self._compute_hash(file_path)
-        return self.cache_dir / f"{audio_hash}_{orig_sr}to{self.target_sr}hz.npy"
+        return self.cache_dir / f"{audio_hash}_{orig_sr}to{self.target_sr}hz.wav"
 
-    def _load_from_cache(self, file_path: Path) -> Optional[np.ndarray]:
-        """Load audio from cache if exists and valid"""
-        # Need to find cache file by scanning (since we don't know orig_sr)
-        if not self.cache_dir.exists():
-            return None
+    def _save_to_cache(
+        self,
+        cache_path: Path,
+        waveform: np.ndarray,
+        source_path: Path,
+        orig_sr: int
+    ):
+        """Save resampled audio as WAV for partial reading support"""
+        # Save as WAV
+        sf.write(cache_path, waveform, self.target_sr)
 
-        audio_hash = self._compute_hash(file_path)
-
-        # Find matching cache file
-        for cache_file in self.cache_dir.glob(f"{audio_hash}_*to{self.target_sr}hz.npy"):
-            meta_path = cache_file.with_suffix('.json')
-            if meta_path.exists():
-                try:
-                    with open(meta_path, 'r') as f:
-                        meta = json.load(f)
-
-                    if meta.get('source_path') == str(file_path):
-                        return np.load(cache_file)
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-        return None
-
-    def _save_to_cache(self, file_path: Path, waveform: np.ndarray, orig_sr: int):
-        """Save resampled audio to cache"""
-        cache_path = self._get_cache_path(file_path, orig_sr)
+        # Save metadata
         meta_path = cache_path.with_suffix('.json')
-
-        np.save(cache_path, waveform)
-
         meta = {
-            'source_path': str(file_path),
+            'source_path': str(source_path),
             'orig_sr': orig_sr,
             'target_sr': self.target_sr,
             'shape': list(waveform.shape),
-            'dtype': str(waveform.dtype)
+            'dtype': str(waveform.dtype),
+            'cache_format': 'wav'
         }
         with open(meta_path, 'w') as f:
             json.dump(meta, f, indent=4)
@@ -205,9 +235,10 @@ class AudioReader:
             return 0
 
         count = 0
-        for file in self.cache_dir.glob('*.npy'):
-            file.unlink()
-            count += 1
+        for ext in ['*.wav', '*.npy']:
+            for file in self.cache_dir.glob(ext):
+                file.unlink()
+                count += 1
 
         for file in self.cache_dir.glob('*.json'):
             file.unlink()
@@ -232,13 +263,14 @@ class AudioReader:
                 'total_size_mb': 0
             }
 
-        npy_files = list(self.cache_dir.glob('*.npy'))
-        total_size = sum(f.stat().st_size for f in npy_files)
+        # Count both wav and npy files
+        cache_files = list(self.cache_dir.glob('*.wav')) + list(self.cache_dir.glob('*.npy'))
+        total_size = sum(f.stat().st_size for f in cache_files)
 
         return {
             'enabled': True,
             'cache_dir': str(self.cache_dir),
-            'file_count': len(npy_files),
+            'file_count': len(cache_files),
             'total_size_mb': round(total_size / (1024 * 1024), 2)
         }
 
