@@ -32,11 +32,12 @@ class DatasetConfig:
     sample_rate: int = 16000
     duration: float = 10.0
     stride: float = 1
+    cry_rate: float = 0.5
     cache_dir: Optional[str] = './audio_cache'
     use_cache: bool = True
     force_mono: bool = True
-    augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    feature: FeatureConfig = field(default_factory=FeatureConfig)
+    aug_config: AugmentationConfig = field(default_factory=AugmentationConfig)
+    feature_config: FeatureConfig = field(default_factory=FeatureConfig)
 
 
 @dataclass
