@@ -21,8 +21,8 @@ dataset:
     - .mp3
     - .flac
   sample_rate: 16000          # Target sample rate for audio
-  duration: 10.0              # Duration of each audio segment (seconds)
-  stride: 1.0                 # Stride between segments (seconds)
+  slice_len: 5.0              # Duration of each audio segment (seconds)
+  stride: 3.0                 # Stride between segments (seconds)
   cry_rate: 0.5               # Ratio of cry samples in batch
   cache_dir: ./audio_cache    # Directory for caching resampled audio
   use_cache: true             # Enable caching

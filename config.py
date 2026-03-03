@@ -55,8 +55,8 @@ class DatasetConfig:
     """Dataset configuration"""
     audio_suffixes: tuple = ('.wav', '.mp3', '.flac')
     sample_rate: int = 16000
-    duration: float = 10.0
-    stride: float = 1.0
+    slice_len: float = 5.0
+    stride: float = 3.0
     cry_rate: float = 0.5
     cache_dir: Optional[str] = './audio_cache'
     use_cache: bool = True
