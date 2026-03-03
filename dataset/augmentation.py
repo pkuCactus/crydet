@@ -4,9 +4,9 @@ Supports various augmentation techniques for audio classification
 """
 
 import numpy as np
-from typing import Optional, Tuple
+import torch
+from typing import Optional, Tuple, List, Callable
 from scipy import signal
-from scipy.io import wavfile
 
 try:
     import librosa
@@ -350,6 +350,212 @@ def mixup(
     mixed = lam * waveform1[:min_len] + (1 - lam) * waveform2[:min_len]
 
     return mixed.astype(waveform1.dtype), lam
+
+
+def mixup_batch(
+    waveforms: np.ndarray,
+    labels: np.ndarray,
+    alpha: float = 0.4,
+    num_classes: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Batch-level mixup augmentation
+
+    Randomly shuffles batch and mixes with original, returning mixed samples
+    and soft labels (for use with cross-entropy loss).
+
+    Args:
+        waveforms: Batch of waveforms, shape (batch_size, seq_len)
+        labels: Batch of labels, shape (batch_size,) - integer class indices
+        alpha: Beta distribution parameter for mixup
+        num_classes: Number of classes (inferred from labels if None)
+
+    Returns:
+        Tuple of (mixed waveforms, soft labels)
+        - mixed waveforms: shape (batch_size, seq_len)
+        - soft labels: shape (batch_size, num_classes) - one-hot mixed labels
+    """
+    batch_size = len(waveforms)
+
+    if num_classes is None:
+        num_classes = int(np.max(labels)) + 1
+
+    # Sample mixup coefficient from Beta distribution
+    lam = np.random.beta(alpha, alpha)
+
+    # Shuffle indices
+    shuffle_idx = np.random.permutation(batch_size)
+
+    # Mix waveforms
+    mixed_waveforms = lam * waveforms + (1 - lam) * waveforms[shuffle_idx]
+
+    # Create soft labels (one-hot then mix)
+    # For efficiency, we return (labels, shuffled_labels, lam) tuple
+    # The loss function should compute: lam * CE(pred, labels) + (1-lam) * CE(pred, shuffled_labels)
+    # This avoids creating large one-hot matrices
+    shuffled_labels = labels[shuffle_idx]
+
+    return mixed_waveforms.astype(waveforms.dtype), labels, shuffled_labels, lam
+
+
+def mixup_batch_soft(
+    waveforms: np.ndarray,
+    labels: np.ndarray,
+    alpha: float = 0.4,
+    num_classes: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Batch-level mixup with explicit soft labels
+
+    Args:
+        waveforms: Batch of waveforms, shape (batch_size, seq_len)
+        labels: Batch of labels, shape (batch_size,) - integer class indices
+        alpha: Beta distribution parameter for mixup
+        num_classes: Number of classes (inferred from labels if None)
+
+    Returns:
+        Tuple of (mixed waveforms, soft labels)
+        - mixed waveforms: shape (batch_size, seq_len)
+        - soft labels: shape (batch_size, num_classes)
+    """
+    batch_size = len(waveforms)
+
+    if num_classes is None:
+        num_classes = int(np.max(labels)) + 1
+
+    # Sample mixup coefficient from Beta distribution
+    lam = np.random.beta(alpha, alpha)
+
+    # Shuffle indices
+    shuffle_idx = np.random.permutation(batch_size)
+
+    # Mix waveforms
+    mixed_waveforms = lam * waveforms + (1 - lam) * waveforms[shuffle_idx]
+
+    # Create one-hot labels
+    one_hot_labels = np.zeros((batch_size, num_classes), dtype=np.float32)
+    one_hot_labels[np.arange(batch_size), labels] = 1.0
+
+    # Create shuffled one-hot labels
+    one_hot_shuffled = np.zeros((batch_size, num_classes), dtype=np.float32)
+    one_hot_shuffled[np.arange(batch_size), labels[shuffle_idx]] = 1.0
+
+    # Mix labels
+    soft_labels = lam * one_hot_labels + (1 - lam) * one_hot_shuffled
+
+    return mixed_waveforms.astype(waveforms.dtype), soft_labels
+
+
+class MixupCollateFn:
+    """
+    Collate function with mixup augmentation for DataLoader
+
+    Binary classification: cry (1) vs non-cry (0)
+    Any label containing 'cry' is treated as positive class.
+
+    Example:
+        >>> collate_fn = MixupCollateFn(alpha=0.4, mixup_prob=0.5)
+        >>> dataloader = DataLoader(dataset, batch_size=32, collate_fn=collate_fn)
+        >>> for waveforms, labels_a, labels_b, lam in dataloader:
+        ...     loss = lam * criterion(model(waveforms), labels_a) + \
+        ...            (1 - lam) * criterion(model(waveforms), labels_b)
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.4,
+        mixup_prob: float = 0.5
+    ):
+        """
+        Initialize MixupCollateFn
+
+        Args:
+            alpha: Beta distribution parameter for mixup (default: 0.4)
+            mixup_prob: Probability of applying mixup to each batch (default: 0.5)
+        """
+        self.alpha = alpha
+        self.mixup_prob = mixup_prob
+
+    def _label_to_idx(self, label: str) -> int:
+        """Convert string label to binary index: cry=1, others=0"""
+        return 1 if 'cry' in label.lower() else 0
+
+    def __call__(
+        self,
+        batch: List[Tuple[np.ndarray, str]]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """
+        Collate a batch of samples with optional mixup
+
+        Args:
+            batch: List of (waveform, label) tuples
+
+        Returns:
+            (waveforms, labels_a, labels_b, lam)
+            - waveforms: torch.Tensor, shape (batch_size, seq_len)
+            - labels_a: torch.Tensor, shape (batch_size,) - original labels
+            - labels_b: torch.Tensor, shape (batch_size,) - shuffled labels
+            - lam: float - mixup coefficient (1.0 if no mixup)
+        """
+        # Separate waveforms and labels
+        waveforms = [item[0] for item in batch]
+        labels_str = [item[1] for item in batch]
+
+        # Stack waveforms into array (pad to max length)
+        max_len = max(len(w) for w in waveforms)
+        waveforms_padded = np.zeros((len(waveforms), max_len), dtype=np.float32)
+        for i, w in enumerate(waveforms):
+            waveforms_padded[i, :len(w)] = w
+
+        # Convert string labels to binary indices (cry=1, non-cry=0)
+        labels = np.array([self._label_to_idx(label) for label in labels_str], dtype=np.int64)
+
+        # Decide whether to apply mixup
+        if np.random.random() < self.mixup_prob and self.alpha > 0:
+            mixed_waveforms, labels_a, labels_b, lam = mixup_batch(
+                waveforms_padded, labels, self.alpha, num_classes=2
+            )
+            return (
+                torch.from_numpy(mixed_waveforms),
+                torch.from_numpy(labels_a),
+                torch.from_numpy(labels_b),
+                lam
+            )
+        else:
+            # No mixup - return original batch with lam=1.0
+            return (
+                torch.from_numpy(waveforms_padded),
+                torch.from_numpy(labels),
+                torch.from_numpy(labels),
+                1.0
+            )
+
+
+def mixup_criterion(
+    criterion: Callable,
+    predictions: torch.Tensor,
+    labels_a: torch.Tensor,
+    labels_b: torch.Tensor,
+    lam: float
+) -> torch.Tensor:
+    """
+    Compute mixup loss from standard criterion
+
+    Args:
+        criterion: Loss function that takes (predictions, labels)
+        predictions: Model outputs, shape (batch_size, num_classes)
+        labels_a: First set of labels, shape (batch_size,)
+        labels_b: Second set of labels (shuffled), shape (batch_size,)
+        lam: Mixup coefficient
+
+    Returns:
+        Mixed loss value
+
+    Example:
+        >>> criterion = torch.nn.CrossEntropyLoss()
+        >>> loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
+    """
+    return lam * criterion(predictions, labels_a) + (1 - lam) * criterion(predictions, labels_b)
 
 
 def spec_augment(
