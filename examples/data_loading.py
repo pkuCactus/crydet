@@ -99,7 +99,7 @@ def main():
     config = load_config(config_path)
     print(f"    配置文件: {config_path}")
     print(f"    采样率: {config.dataset.sample_rate} Hz")
-    print(f"    片段时长: {config.dataset.duration} 秒")
+    print(f"    片段时长: {config.dataset.slice_len} 秒")
     print(f"    Cry 比例: {config.dataset.cry_rate}")
     print(f"    批大小: {config.training.batch_size}")
 
