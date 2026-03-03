@@ -6,6 +6,7 @@ import logging
 import os
 import random
 
+import numpy as np
 import soundfile as sf
 import tqdm
 from torch.utils.data import Dataset, DataLoader, Sampler
@@ -44,9 +45,49 @@ class CryDataset(Dataset):
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index
         file_schedule = self.file_schedule_dict[label][file_idx]
-        file_path, start_time, slice_len = file_schedule
-        waveform, _ = self.audio_reader.load_by_time(file_path, start_time, start_time + slice_len)
+        file_path, start_time, actual_len, need_pad = file_schedule
+
+        # 加载音频片段
+        waveform, _ = self.audio_reader.load_by_time(file_path, start_time, start_time + actual_len)
+
+        # 如果需要补全
+        if need_pad:
+            target_samples = int(self.config.slice_len * self.config.sample_rate)
+            waveform = self._pad_waveform(waveform, target_samples)
+
         return waveform, label
+
+    def _pad_waveform(self, waveform: np.ndarray, target_length: int) -> np.ndarray:
+        """
+        补全波形到目标长度 (随机补零或噪声)
+
+        Args:
+            waveform: 原始波形
+            target_length: 目标长度(采样点数)
+
+        Returns:
+            补全后的波形
+        """
+        current_length = len(waveform)
+        pad_length = target_length - current_length
+
+        if pad_length <= 0:
+            return waveform
+
+        # 随机选择补零或补噪声
+        if random.random() < 0.5:
+            padding = np.zeros(pad_length, dtype=np.float32)
+        else:
+            noise_level = 0.01 * np.std(waveform) if np.std(waveform) > 0 else 0.001
+            padding = np.random.randn(pad_length).astype(np.float32) * noise_level
+
+        # 随机选择补在前面还是后面
+        if random.random() < 0.5:
+            waveform = np.concatenate([padding, waveform])
+        else:
+            waveform = np.concatenate([waveform, padding])
+
+        return waveform
 
     def __len__(self):
         others = sum(len(schedules) for label, schedules in self.file_schedule_dict.items() if label != 'cry')
@@ -87,26 +128,43 @@ class CryDataset(Dataset):
                     file_infos.append((file_abs_path, duration))
         return file_infos
 
-    def _get_file_schedule(self, file_infos: list, slice_len: int = 10, rand: int = 5):
+    def _get_file_schedule(self, file_infos: list) -> list:
+        """
+        生成文件调度列表
+
+        规则:
+        - duration < MIN_DURATION: 跳过
+        - duration < slice_len: 取整个文件, 需要 pad
+        - duration >= slice_len: 随机选择起始位置 [0, 1), 按 stride 切分
+
+        Returns:
+            [(file_path, start_time, actual_len, need_pad), ...]
+        """
         file_schedules = []
-        for f, duration in file_infos:
+        slice_len = self.config.slice_len
+        stride = self.config.stride
+
+        for file_path, duration in file_infos:
+            # 跳过过短的音频
             if duration < MIN_DURATION:
-                LOGGER.warning(f"Skipping {f} due to short duration ({duration:.2f}s)")
+                LOGGER.warning(f"Skipping {file_path} due to short duration ({duration:.3f}s)")
                 continue
-            if duration < self.config.duration + 1:
-                file_schedules.append((f, 0., max(duration, self.config.duration)))
-            elif duration < slice_len + rand:
-                s = random.random() / 2
-                file_schedules.append((f, s, duration - s))
+
+            if duration < slice_len:
+                # 短于 slice_len: 取整个文件, 需要 pad
+                file_schedules.append((file_path, 0.0, duration, True))
+
             else:
-                s = random.random() / 2
-                while s < duration:
-                    cur_slice_len = random.randint(slice_len - rand, slice_len + rand)
-                    cur_slice_len = min(cur_slice_len, duration - s)
-                    if s + cur_slice_len + rand >= duration:
-                        cur_slice_len = duration - s
-                    file_schedules.append((f, s, cur_slice_len))
-                    s += cur_slice_len
+                # 长于等于 slice_len: 按 stride 切分
+                # 计算最大起始位置
+                s = random.random()
+                while s + slice_len <= duration:
+                    file_schedules.append((file_path, s, slice_len, False))
+                    s += stride
+                if s < duration:
+                    # 最后一个片段不足 slice_len, 取剩余部分, 需要 pad
+                    file_schedules.append((file_path, s, duration - s, True))
+
         return file_schedules
 
     def _get_schedule_dict(self, dataset_dict: dict):
