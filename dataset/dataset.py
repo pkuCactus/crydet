@@ -155,13 +155,12 @@ class CryDataset(Dataset):
                 file_schedules.append((file_path, 0.0, duration, True))
 
             else:
-                # 长于等于 slice_len: 按 stride 切分
-                # 计算最大起始位置
+                # 长于等于 slice_len: 基于随机起始位置，按 stride 切分
                 s = random.random()
                 while s + slice_len <= duration:
                     file_schedules.append((file_path, s, slice_len, False))
                     s += stride
-                if s < duration:
+                if s < duration and duration - s >= MIN_DURATION:
                     # 最后一个片段不足 slice_len, 取剩余部分, 需要 pad
                     file_schedules.append((file_path, s, duration - s, True))
 

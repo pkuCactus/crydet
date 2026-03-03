@@ -163,8 +163,8 @@ def _dict_to_config(yaml_dict: Dict[str, Any]) -> Config:
     dataset_config = DatasetConfig(
         audio_suffixes=tuple(data_dict.get('audio_suffixes', ('.wav', '.mp3', '.flac'))),
         sample_rate=data_dict.get('sample_rate', 16000),
-        duration=data_dict.get('duration', 10.0),
-        stride=data_dict.get('stride', 1.0),
+        slice_len=data_dict.get('slice_len', 5.0),
+        stride=data_dict.get('stride', 3.0),
         cry_rate=data_dict.get('cry_rate', 0.5),
         cache_dir=data_dict.get('cache_dir', './audio_cache'),
         use_cache=data_dict.get('use_cache', True),
@@ -229,7 +229,7 @@ def save_config(config: Config, save_path: str):
         'dataset': {
             'audio_suffixes': list(config.dataset.audio_suffixes),
             'sample_rate': config.dataset.sample_rate,
-            'duration': config.dataset.duration,
+            'slice_len': config.dataset.slice_len,
             'stride': config.dataset.stride,
             'cry_rate': config.dataset.cry_rate,
             'cache_dir': config.dataset.cache_dir,
