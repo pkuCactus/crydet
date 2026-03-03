@@ -8,7 +8,7 @@ from torch.utils.data import Sampler
 
 class CrySampler(Sampler):
     def __init__(self, data_source = None, cry_rate: float = 0.5, shuffle: bool = True):
-        super().__init__(data_source)
+        super().__init__()
         self.cry_rate = cry_rate
         self.data_source = data_source
         if shuffle:
@@ -26,6 +26,9 @@ class CrySampler(Sampler):
                 label = random.choice(self.data_source.other_labels)
                 yield (label, other_idx[label])
                 other_idx[label] = (other_idx[label] + 1) % self.data_source.num_samples[label]
+
+    def __len__(self):
+        return self.num_samples
 
     @property
     def num_samples(self):

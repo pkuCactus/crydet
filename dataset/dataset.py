@@ -50,7 +50,7 @@ class CryDataset(Dataset):
     def __len__(self):
         others = sum(len(schedules) for label, schedules in self.file_schedule_dict.items() if label != 'cry')
         cry = len(self.file_schedule_dict.get('cry', []))
-        return max(others / (1 - self.config.cry_rate), cry / self.config.cry_rate)
+        return int(max(others / (1 - self.config.cry_rate), cry / self.config.cry_rate))
 
     def generate_schedule(self):
         """Regenerate file schedules for the next epoch"""
@@ -105,8 +105,6 @@ class CryDataset(Dataset):
                         cur_slice_len = duration - s
                     file_schedules.append((f, s, cur_slice_len))
                     s += cur_slice_len
-        if not file_schedules:
-            raise ValueError("No valid audio files found in the provided directories.")
         return file_schedules
 
     def _get_schedule_dict(self, dataset_dict: dict):
@@ -118,4 +116,6 @@ class CryDataset(Dataset):
             for dir_ in dir_list:
                 file_infos.extend(self._get_file_infos(dir_))
             file_schedule_dict[label] = self._get_file_schedule(file_infos)
+            if not file_schedule_dict[label]:
+                raise ValueError(f"No valid audio files found for label '{label}' in directories: {dir_list}")
         return file_schedule_dict

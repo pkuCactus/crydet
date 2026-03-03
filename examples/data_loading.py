@@ -24,24 +24,12 @@ def load_audio_list(json_path: str) -> dict:
         json_path: JSON 文件路径
 
     Returns:
-        数据目录字典 {label: [dir1, dir2, ...]}
+        数据目录字典 {label: [optional[int], dir1, dir2, ...]}
     """
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    data_dict = {}
-    for label, value in data.items():
-        if isinstance(value, list):
-            if isinstance(value[0], int):
-                # 格式: [weight, directory] -> 提取目录
-                data_dict[label] = [value[1]]
-            else:
-                # 格式: [directory1, directory2, ...]
-                data_dict[label] = value
-        else:
-            data_dict[label] = [value]
-
-    return data_dict
+    return data
 
 
 def create_dataloader_from_config(
