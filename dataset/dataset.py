@@ -5,6 +5,7 @@ Cry Detection Dataset and DataLoader
 import logging
 import os
 import random
+from typing import Optional
 
 import numpy as np
 import soundfile as sf
@@ -12,6 +13,7 @@ import tqdm
 from torch.utils.data import Dataset, DataLoader, Sampler
 
 from .audio_reader import AudioReader
+from .augmentation import AudioAugmenter
 from config import DatasetConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
@@ -25,7 +27,8 @@ class CryDataset(Dataset):
     def __init__(
         self,
         data_dict: dict,
-        config: DatasetConfig
+        config: DatasetConfig,
+        use_augmentation: bool = False
     ):
         self.audio_reader = AudioReader(
             target_sr=config.sample_rate,
@@ -35,6 +38,20 @@ class CryDataset(Dataset):
         )
         self.config = config
         self.data_dict = data_dict
+        self.use_augmentation = use_augmentation
+
+        # Initialize augmenter if enabled
+        self.augmenter: Optional[AudioAugmenter] = None
+        if use_augmentation and config.aug_config:
+            aug = config.aug_config
+            self.augmenter = AudioAugmenter(
+                noise_rate=aug.noise_rate,
+                mask_rate=aug.mask_rate,
+                pitch_shift=aug.pitch_shift,
+                reverb_rate=aug.reverb_rate,
+                gain_db=aug.gain_db,
+                sample_rate=config.sample_rate
+            )
 
         # 构建文件调度字典
         self.file_schedule_dict = self._get_schedule_dict(data_dict)
@@ -54,6 +71,10 @@ class CryDataset(Dataset):
         if need_pad:
             target_samples = int(self.config.slice_len * self.config.sample_rate)
             waveform = self._pad_waveform(waveform, target_samples)
+
+        # Apply augmentation if enabled
+        if self.augmenter is not None:
+            waveform = self.augmenter(waveform)
 
         return waveform, label
 
