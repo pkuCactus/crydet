@@ -31,7 +31,6 @@ class AudioReader:
         self,
         target_sr: int = 16000,
         cache_dir: Optional[str] = None,
-        use_cache: bool = True,
         force_mono: bool = True
     ):
         """
@@ -40,16 +39,14 @@ class AudioReader:
         Args:
             target_sr: Target sample rate (default: 16000)
             cache_dir: Directory to cache resampled audio as WAV (default: None)
-            use_cache: Whether to use cache (default: True)
             force_mono: Convert stereo to mono (default: True)
         """
         self.target_sr = target_sr
         self.cache_dir = Path(cache_dir) if cache_dir else None
-        self.use_cache = use_cache
         self.force_mono = force_mono
 
         # Create cache directory if needed
-        if self.use_cache and self.cache_dir:
+        if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def load(
@@ -90,7 +87,7 @@ class AudioReader:
         cache_path = self._get_cache_path(file_path, orig_sr)
 
         # Check if cached WAV exists
-        if self.use_cache and self.cache_dir and cache_path.exists():
+        if self.cache_dir and cache_path.exists():
             # Read from cached WAV with partial support
             waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
             if self.force_mono and waveform.ndim > 1:
@@ -107,7 +104,7 @@ class AudioReader:
         waveform = self._resample(waveform, orig_sr, self.target_sr)
 
         # Save as WAV for partial reading support
-        if self.use_cache and self.cache_dir:
+        if self.cache_dir is not None:
             self._save_to_cache(cache_path, waveform, file_path, orig_sr)
             # Now read partial from cache
             if start != 0 or stop is not None:
@@ -278,6 +275,5 @@ class AudioReader:
         return (
             f"AudioReader(target_sr={self.target_sr}, "
             f"cache_dir={self.cache_dir}, "
-            f"use_cache={self.use_cache}, "
             f"force_mono={self.force_mono})"
         )

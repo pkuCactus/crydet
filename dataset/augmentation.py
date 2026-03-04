@@ -5,7 +5,12 @@ Supports various augmentation techniques for audio classification
 
 import numpy as np
 import torch
-from typing import Optional, Tuple, List, Callable
+import random
+from typing import Optional, Tuple, List, Union, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .audio_reader import AudioReader
+
 from scipy import signal
 
 try:
@@ -17,122 +22,358 @@ except ImportError:
 
 class AudioAugmenter:
     """
-    Audio augmentation with configurable parameters
+    Audio augmentation with label-aware enhancement chains
 
-    Supports:
-    - Additive noise
-    - Time masking
-    - Pitch shift
-    - Reverb
-    - Random gain
-    - Mixup (applied at batch level)
+    Cry samples:
+        - cry_aug_rate: probability of applying pitch/reverb/phaser
+        - cry_mix_rate: probability of mixing with non-cry sample
+        - When mixing, mix_rate is sampled from Gaussian(cry_mix_mean, cry_mix_std)
+
+    Non-cry samples:
+        - non_cry_aug_rate: probability of applying pitch/reverb/phaser/echo
+
+    The augmenter encapsulates all augmentation logic internally, including
+    loading non-cry samples for mixup when needed.
     """
 
     def __init__(
         self,
-        noise_rate: Optional[float] = None,
-        mask_rate: Optional[float] = None,
-        pitch_shift: Optional[float] = None,
-        reverb_rate: Optional[float] = None,
-        gain_db: Optional[float] = None,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        audio_reader: Optional['AudioReader'] = None,
+        # Cry augmentation
+        cry_aug_rate: float = 0.5,
+        cry_mix_rate: float = 0.3,
+        cry_mix_mean: float = 0.5,
+        cry_mix_std: float = 0.15,
+        # Non-cry augmentation
+        non_cry_aug_rate: float = 0.5,
+        # Pitch shift range
+        pitch_shift: float = 2.0,
+        # Individual effect probabilities
+        pitch_prob: float = 0.5,
+        reverb_prob: float = 0.5,
+        phaser_prob: float = 0.5,
+        echo_prob: float = 0.5
     ):
         """
-        Initialize augmenter with parameters
+        Initialize augmenter
 
         Args:
-            noise_rate: Noise addition probability (0-1)
-            mask_rate: Time masking probability (0-1)
-            pitch_shift: Pitch shift range in semitones (e.g., 2.0 means -2 to +2)
-            reverb_rate: Reverb probability (0-1)
-            gain_db: Random gain range in dB (e.g., 6.0 means -6 to +6 dB)
             sample_rate: Audio sample rate
+            audio_reader: AudioReader instance for loading audio files
+            cry_aug_rate: Probability of applying augmentation to cry samples
+            cry_mix_rate: Probability of mixing cry with non-cry sample
+            cry_mix_mean: Mean of Gaussian distribution for mix_rate
+            cry_mix_std: Std of Gaussian distribution for mix_rate
+            non_cry_aug_rate: Probability of applying augmentation to non-cry samples
+            pitch_shift: Pitch shift range in semitones
+            pitch_prob: Probability of applying pitch shift
+            reverb_prob: Probability of applying reverb
+            phaser_prob: Probability of applying phaser
+            echo_prob: Probability of applying echo
         """
-        self.noise_rate = noise_rate
-        self.mask_rate = mask_rate
-        self.pitch_shift = pitch_shift
-        self.reverb_rate = reverb_rate
-        self.gain_db = gain_db
         self.sample_rate = sample_rate
+        self._audio_reader = audio_reader
+        self.cry_aug_rate = cry_aug_rate
+        self.cry_mix_rate = cry_mix_rate
+        self.cry_mix_mean = cry_mix_mean
+        self.cry_mix_std = cry_mix_std
+        self.non_cry_aug_rate = non_cry_aug_rate
+        self.pitch_shift = pitch_shift
+        self.pitch_prob = pitch_prob
+        self.reverb_prob = reverb_prob
+        self.phaser_prob = phaser_prob
+        self.echo_prob = echo_prob
 
-    def __call__(self, waveform: np.ndarray) -> np.ndarray:
-        """Apply all enabled augmentations to waveform"""
-        augmented = waveform.copy()
+        # Internal state for mixup
+        self._file_schedule_dict: Dict[str, List] = {}
+        self._non_cry_labels: List[str] = []
+        self._num_samples: Dict[str, int] = {}
+        self._slice_len: float = 1.0  # Default slice length in seconds
 
-        if self.noise_rate is not None and np.random.random() < self.noise_rate:
-            augmented = self.add_noise(augmented)
+    @property
+    def audio_reader(self) -> Optional['AudioReader']:
+        """Get the audio reader instance"""
+        return self._audio_reader
 
-        if self.mask_rate is not None and np.random.random() < self.mask_rate:
-            augmented = self.time_mask(augmented)
+    @audio_reader.setter
+    def audio_reader(self, value: Optional['AudioReader']):
+        """Set the audio reader instance"""
+        self._audio_reader = value
 
-        if self.pitch_shift is not None and np.random.random() < 0.5:
-            augmented = self.pitch_shift_audio(augmented)
+    @property
+    def file_schedule_dict(self) -> Dict[str, List]:
+        """Get the file schedule dictionary"""
+        return self._file_schedule_dict
 
-        if self.reverb_rate is not None and np.random.random() < self.reverb_rate:
-            augmented = self.add_reverb(augmented)
+    @file_schedule_dict.setter
+    def file_schedule_dict(self, value: Dict[str, List]):
+        """
+        Set the file schedule dictionary and update internal state
 
-        if self.gain_db is not None:
-            augmented = self.random_gain(augmented)
+        Args:
+            value: Dictionary mapping labels to file schedules
+                   {label: [(file_path, start_time, actual_len, need_pad), ...]}
+        """
+        self._file_schedule_dict = value
+        self._non_cry_labels = [label for label in value if label != 'cry']
+        self._num_samples = {label: len(schedules) for label, schedules in value.items()}
 
-        return augmented
+    def set_slice_len(self, slice_len: float):
+        """Set the slice length for padding"""
+        self._slice_len = slice_len
 
-    def add_noise(
+    def augment(
         self,
         waveform: np.ndarray,
-        noise_factor: Optional[float] = None
+        label: str
     ) -> np.ndarray:
         """
-        Add random Gaussian noise to waveform
+        Apply augmentation based on label (encapsulated method)
+
+        This method handles all augmentation logic internally, including
+        loading non-cry samples for mixup when needed.
 
         Args:
             waveform: Input audio waveform
-            noise_factor: Noise scaling factor (default: random 0.001-0.01)
+            label: Label string (e.g., 'cry', 'animal_world', 'news')
 
         Returns:
-            Noisy waveform
+            Augmented waveform
         """
-        if noise_factor is None:
-            noise_factor = np.random.uniform(0.001, 0.01)
+        is_cry = label is not None and 'cry' in label.lower()
 
-        # Scale noise relative to signal
-        rms = np.sqrt(np.mean(waveform ** 2))
-        if rms > 0:
-            noise = np.random.randn(len(waveform)).astype(waveform.dtype)
-            noise = noise * rms * noise_factor
-            augmented = waveform + noise
+        if is_cry and self._non_cry_labels and self._audio_reader is not None:
+            # Try mixup for cry samples
+            if np.random.random() < self.cry_mix_rate:
+                # Load a random non-cry sample
+                non_cry_waveform = self._load_random_non_cry(waveform.shape[0])
+                if non_cry_waveform is not None:
+                    mix_rate = self._sample_mix_rate()
+                    # Apply effects first
+                    if np.random.random() < self.cry_aug_rate:
+                        effects = [
+                            ('pitch', self.pitch_prob),
+                            ('reverb', self.reverb_prob),
+                            ('phaser', self.phaser_prob)
+                        ]
+                        waveform = self._apply_effects(waveform, effects)
+                    # Apply mixup
+                    waveform = self.apply_mixup(waveform, non_cry_waveform, mix_rate)
+                    return self._normalize(waveform)
+
+            # No mixup, just apply effects
+            if np.random.random() < self.cry_aug_rate:
+                effects = [
+                    ('pitch', self.pitch_prob),
+                    ('reverb', self.reverb_prob),
+                    ('phaser', self.phaser_prob)
+                ]
+                waveform = self._apply_effects(waveform, effects)
         else:
-            augmented = waveform
+            # Non-cry augmentation
+            if np.random.random() < self.non_cry_aug_rate:
+                effects = [
+                    ('pitch', self.pitch_prob),
+                    ('reverb', self.reverb_prob),
+                    ('phaser', self.phaser_prob),
+                    ('echo', self.echo_prob)
+                ]
+                waveform = self._apply_effects(waveform, effects)
 
-        return augmented.astype(waveform.dtype)
+        return self._normalize(waveform)
 
-    def time_mask(
+    def _load_random_non_cry(self, target_length: int) -> Optional[np.ndarray]:
+        """
+        Load a random non-cry sample for mixup
+
+        Args:
+            target_length: Target length in samples for padding
+
+        Returns:
+            Non-cry waveform or None if not available
+        """
+        if not self._non_cry_labels or not self._audio_reader or not self._file_schedule_dict:
+            return None
+
+        try:
+            non_cry_label = random.choice(self._non_cry_labels)
+            num_samples = self._num_samples.get(non_cry_label, 0)
+            if num_samples == 0:
+                return None
+
+            non_cry_idx = random.randint(0, num_samples - 1)
+            non_cry_schedule = self._file_schedule_dict[non_cry_label][non_cry_idx]
+            non_cry_path, non_cry_start, non_cry_len, non_cry_need_pad = non_cry_schedule
+
+            non_cry_waveform, _ = self._audio_reader.load_by_time(
+                non_cry_path, non_cry_start, non_cry_start + non_cry_len
+            )
+
+            if non_cry_need_pad:
+                non_cry_waveform = self._pad_waveform(non_cry_waveform, target_length)
+
+            return non_cry_waveform
+        except Exception:
+            return None
+
+    def _pad_waveform(self, waveform: np.ndarray, target_length: int) -> np.ndarray:
+        """Pad waveform to target length"""
+        current_length = len(waveform)
+        pad_length = target_length - current_length
+
+        if pad_length <= 0:
+            return waveform
+
+        # Random choice: pad with zeros or noise
+        if random.random() < 0.5:
+            padding = np.zeros(pad_length, dtype=np.float32)
+        else:
+            noise_level = 0.01 * np.std(waveform) if np.std(waveform) > 0 else 0.001
+            padding = np.random.randn(pad_length).astype(np.float32) * noise_level
+
+        # Random choice: pad at start or end
+        if random.random() < 0.5:
+            waveform = np.concatenate([padding, waveform])
+        else:
+            waveform = np.concatenate([waveform, padding])
+
+        return waveform
+
+    def _normalize(self, waveform: np.ndarray) -> np.ndarray:
+        """Normalize waveform to prevent clipping"""
+        max_val = np.max(np.abs(waveform))
+        if max_val > 1.0:
+            waveform = waveform / max_val
+        return waveform.astype(np.float32)
+
+    def __call__(
         self,
         waveform: np.ndarray,
-        max_mask_ratio: float = 0.1
-    ) -> np.ndarray:
+        label: str = None,
+        non_cry_waveform: np.ndarray = None
+    ) -> Tuple[np.ndarray, bool, float]:
         """
-        Apply time masking (randomly zero out segments)
+        Apply augmentation based on label (backward compatible method)
 
         Args:
             waveform: Input audio waveform
-            max_mask_ratio: Maximum ratio of audio to mask (0-1)
+            label: Label string (e.g., 'cry', 'animal_world', 'news')
+            non_cry_waveform: Optional non-cry waveform for mixup
 
         Returns:
-            Masked waveform
+            Tuple of (augmented waveform, needs_mixup, mix_rate)
+            - augmented waveform: The augmented audio
+            - needs_mixup: Whether mixup is needed (only for cry samples)
+            - mix_rate: The mixing rate (sampled from Gaussian, in (0,1))
         """
+        is_cry = label is not None and 'cry' in label.lower()
+
+        needs_mixup = False
+        mix_rate = 0.0
+
+        if is_cry:
+            # Check if mixup is needed
+            if non_cry_waveform is not None and np.random.random() < self.cry_mix_rate:
+                needs_mixup = True
+                # Sample mix_rate from Gaussian, resample if not in (0, 1)
+                mix_rate = self._sample_mix_rate()
+
+            # Check if augmentation is needed
+            if np.random.random() < self.cry_aug_rate:
+                effects = [
+                    ('pitch', self.pitch_prob),
+                    ('reverb', self.reverb_prob),
+                    ('phaser', self.phaser_prob)
+                ]
+                waveform = self._apply_effects(waveform, effects)
+        else:
+            # Non-cry augmentation
+            if np.random.random() < self.non_cry_aug_rate:
+                effects = [
+                    ('pitch', self.pitch_prob),
+                    ('reverb', self.reverb_prob),
+                    ('phaser', self.phaser_prob),
+                    ('echo', self.echo_prob)
+                ]
+                waveform = self._apply_effects(waveform, effects)
+
+        # Normalize to prevent clipping
+        waveform = self._normalize(waveform)
+
+        return waveform, needs_mixup, mix_rate
+
+    def _sample_mix_rate(self, max_attempts: int = 100) -> float:
+        """
+        Sample mix_rate from Gaussian distribution, ensuring it's in (0, 1)
+
+        Args:
+            max_attempts: Maximum number of resampling attempts
+
+        Returns:
+            mix_rate in (0, 1)
+        """
+        for _ in range(max_attempts):
+            mix_rate = np.random.normal(self.cry_mix_mean, self.cry_mix_std)
+            if 0.0 < mix_rate < 1.0:
+                return mix_rate
+        # Fallback to mean if we can't sample a valid value
+        return max(0.01, min(0.99, self.cry_mix_mean))
+
+    def _apply_effects(self, waveform: np.ndarray, effects: List[Tuple[str, float]]) -> np.ndarray:
+        """
+        Apply effects with probabilities in random order
+
+        Args:
+            waveform: Input waveform
+            effects: List of (effect_name, probability) tuples
+
+        Returns:
+            Augmented waveform
+        """
+        effects = effects.copy()
+        random.shuffle(effects)
+
         augmented = waveform.copy()
-        length = len(waveform)
-
-        # Random number of masks (1-3)
-        num_masks = np.random.randint(1, 4)
-
-        for _ in range(num_masks):
-            # Random mask length
-            mask_len = int(length * np.random.uniform(0.01, max_mask_ratio))
-            mask_start = np.random.randint(0, length - mask_len)
-            augmented[mask_start:mask_start + mask_len] = 0
+        for effect, prob in effects:
+            if np.random.random() < prob:
+                if effect == 'pitch':
+                    augmented = self.pitch_shift_audio(augmented)
+                elif effect == 'reverb':
+                    augmented = self.add_reverb(augmented)
+                elif effect == 'phaser':
+                    augmented = self.add_phaser(augmented)
+                elif effect == 'echo':
+                    augmented = self.add_echo(augmented)
 
         return augmented
+
+    def apply_mixup(
+        self,
+        cry_waveform: np.ndarray,
+        non_cry_waveform: np.ndarray,
+        mix_rate: float
+    ) -> np.ndarray:
+        """
+        Apply mixup between cry and non-cry waveforms
+
+        Args:
+            cry_waveform: Cry sample waveform
+            non_cry_waveform: Non-cry sample waveform
+            mix_rate: Mixing coefficient (in 0-1)
+
+        Returns:
+            Mixed waveform
+        """
+        # Ensure same length
+        min_len = min(len(cry_waveform), len(non_cry_waveform))
+        mixed = mix_rate * cry_waveform[:min_len] + (1 - mix_rate) * non_cry_waveform[:min_len]
+
+        # Pad if needed
+        if len(cry_waveform) > min_len:
+            mixed = np.concatenate([mixed, cry_waveform[min_len:]])
+
+        return mixed.astype(cry_waveform.dtype)
 
     def pitch_shift_audio(
         self,
@@ -144,18 +385,18 @@ class AudioAugmenter:
 
         Args:
             waveform: Input audio waveform
-            n_steps: Number of semitones to shift (default: random within config range)
+            n_steps: Number of semitones to shift
 
         Returns:
             Pitch-shifted waveform
         """
         if n_steps is None:
-            if self.pitch_shift is None:
-                return waveform
             n_steps = np.random.uniform(-self.pitch_shift, self.pitch_shift)
 
+        if abs(n_steps) < 0.1:
+            return waveform
+
         if HAS_LIBROSA:
-            # Use librosa for high-quality pitch shifting
             try:
                 shifted = librosa.effects.pitch_shift(
                     waveform,
@@ -166,35 +407,14 @@ class AudioAugmenter:
             except Exception:
                 pass
 
-        # Fallback: simple resampling-based pitch shift
-        return self._pitch_shift_resample(waveform, n_steps)
-
-    def _pitch_shift_resample(
-        self,
-        waveform: np.ndarray,
-        n_steps: float
-    ) -> np.ndarray:
-        """
-        Pitch shift via resampling (lower quality but no librosa dependency)
-
-        Args:
-            waveform: Input audio waveform
-            n_steps: Number of semitones to shift
-
-        Returns:
-            Pitch-shifted waveform
-        """
-        # Calculate speed change factor
+        # Fallback: resampling-based pitch shift
         factor = 2 ** (n_steps / 12.0)
-
-        # Resample to change pitch
         new_length = int(len(waveform) / factor)
-        if new_length < 100:  # Safety check
+        if new_length < 100:
             return waveform
 
         resampled = signal.resample(waveform, new_length)
 
-        # Pad or truncate to original length
         if len(resampled) < len(waveform):
             pad_len = len(waveform) - len(resampled)
             resampled = np.pad(resampled, (0, pad_len), mode='constant')
@@ -210,25 +430,25 @@ class AudioAugmenter:
         decay: Optional[float] = None
     ) -> np.ndarray:
         """
-        Add simple reverb effect using delayed echoes
+        Add reverb effect using delayed echoes
 
         Args:
             waveform: Input audio waveform
-            room_scale: Room size (affects delay time, 0-1)
-            decay: Decay factor for echoes (0-1)
+            room_scale: Room size (0-1)
+            decay: Decay factor (0-1)
 
         Returns:
             Waveform with reverb
         """
         if room_scale is None:
-            room_scale = np.random.uniform(0.1, 0.5)
+            room_scale = np.random.uniform(0.1, 0.4)
         if decay is None:
-            decay = np.random.uniform(0.2, 0.5)
+            decay = np.random.uniform(0.2, 0.4)
 
         augmented = waveform.copy()
 
-        # Create multiple delayed echoes
-        delay_times = [0.03, 0.05, 0.08, 0.12]  # seconds
+        # Multiple delayed echoes
+        delay_times = [0.02, 0.04, 0.06, 0.10]
         decay_factors = [decay, decay * 0.7, decay * 0.5, decay * 0.3]
 
         for delay_time, decay_factor in zip(delay_times, decay_factors):
@@ -238,147 +458,151 @@ class AudioAugmenter:
                 delayed[delay_samples:] = waveform[:-delay_samples] * decay_factor
                 augmented = augmented + delayed
 
-        # Normalize to prevent clipping
-        max_val = np.max(np.abs(augmented))
-        if max_val > 1.0:
-            augmented = augmented / max_val
-
         return augmented.astype(waveform.dtype)
 
-    def random_gain(
+    def add_phaser(
         self,
         waveform: np.ndarray,
-        gain_range_db: Optional[float] = None
+        rate: Optional[float] = None,
+        depth: Optional[float] = None
     ) -> np.ndarray:
         """
-        Apply random gain to waveform
+        Add phaser effect using modulated all-pass filters
 
         Args:
             waveform: Input audio waveform
-            gain_range_db: Gain range in dB (e.g., 6.0 means -6 to +6 dB)
+            rate: LFO rate in Hz (default: 0.5-2.0)
+            depth: Modulation depth (default: 0.3-0.7)
 
         Returns:
-            Gain-adjusted waveform
-        """
-        if gain_range_db is None:
-            gain_range_db = self.gain_db if self.gain_db is not None else 6.0
-
-        # Random gain in dB
-        gain_db = np.random.uniform(-gain_range_db, gain_range_db)
-
-        # Convert to linear scale
-        gain_linear = 10 ** (gain_db / 20.0)
-
-        augmented = waveform * gain_linear
-
-        # Soft clip to prevent harsh clipping
-        max_val = np.max(np.abs(augmented))
-        if max_val > 1.0:
-            augmented = np.tanh(augmented)
-
-        return augmented.astype(waveform.dtype)
-
-    def time_stretch(
-        self,
-        waveform: np.ndarray,
-        rate: Optional[float] = None
-    ) -> np.ndarray:
-        """
-        Time stretch audio without changing pitch
-
-        Args:
-            waveform: Input audio waveform
-            rate: Stretch rate (e.g., 1.2 means 20% faster)
-
-        Returns:
-            Time-stretched waveform
+            Waveform with phaser effect
         """
         if rate is None:
-            rate = np.random.uniform(0.9, 1.1)
+            rate = np.random.uniform(0.5, 2.0)
+        if depth is None:
+            depth = np.random.uniform(0.3, 0.6)
 
-        if HAS_LIBROSA:
-            try:
-                stretched = librosa.effects.time_stretch(waveform, rate=rate)
-                # Pad or truncate to original length
-                if len(stretched) < len(waveform):
-                    pad_len = len(waveform) - len(stretched)
-                    stretched = np.pad(stretched, (0, pad_len), mode='constant')
-                else:
-                    stretched = stretched[:len(waveform)]
-                return stretched.astype(waveform.dtype)
-            except Exception:
-                pass
+        length = len(waveform)
+        t = np.arange(length) / self.sample_rate
 
-        # Fallback: simple resampling (changes pitch too)
-        new_length = int(len(waveform) * rate)
-        if new_length < 100:
-            return waveform
+        # Create LFO (low frequency oscillator)
+        lfo = 0.5 * (1 + np.sin(2 * np.pi * rate * t))
 
-        resampled = signal.resample(waveform, new_length)
+        # Modulated delay (all-pass simulation)
+        max_delay = int(0.002 * self.sample_rate)  # 2ms max delay
+        min_delay = int(0.0005 * self.sample_rate)  # 0.5ms min delay
 
-        if len(resampled) < len(waveform):
-            pad_len = len(waveform) - len(resampled)
-            resampled = np.pad(resampled, (0, pad_len), mode='constant')
-        else:
-            resampled = resampled[:len(waveform)]
+        augmented = waveform.copy()
 
-        return resampled.astype(waveform.dtype)
+        for stage in range(4):  # 4-stage phaser
+            # Calculate modulated delay for each sample
+            modulated_delay = min_delay + (max_delay - min_delay) * lfo * depth
+
+            # Apply variable delay (simplified)
+            delay_samples = int(np.mean(modulated_delay))
+
+            if delay_samples > 0 and delay_samples < length:
+                delayed = np.zeros_like(waveform)
+                delayed[delay_samples:] = waveform[:-delay_samples]
+                # Mix with feedback
+                augmented = augmented + depth * 0.3 * delayed
+
+        return augmented.astype(waveform.dtype)
+
+    def add_echo(
+        self,
+        waveform: np.ndarray,
+        delay_time: Optional[float] = None,
+        decay: Optional[float] = None,
+        num_echoes: Optional[int] = None
+    ) -> np.ndarray:
+        """
+        Add echo effect
+
+        Args:
+            waveform: Input audio waveform
+            delay_time: Delay time in seconds (default: 0.1-0.3)
+            decay: Echo decay factor (default: 0.3-0.6)
+            num_echoes: Number of echoes (default: 2-4)
+
+        Returns:
+            Waveform with echo
+        """
+        if delay_time is None:
+            delay_time = np.random.uniform(0.1, 0.3)
+        if decay is None:
+            decay = np.random.uniform(0.3, 0.6)
+        if num_echoes is None:
+            num_echoes = np.random.randint(2, 5)
+
+        augmented = waveform.copy()
+        delay_samples = int(delay_time * self.sample_rate)
+
+        for i in range(1, num_echoes + 1):
+            echo_delay = delay_samples * i
+            echo_decay = decay ** i
+
+            if echo_delay < len(waveform):
+                echo = np.zeros_like(waveform)
+                echo[echo_delay:] = waveform[:-echo_delay] * echo_decay
+                augmented = augmented + echo
+
+        return augmented.astype(waveform.dtype)
 
 
 def mixup(
     waveform1: np.ndarray,
     waveform2: np.ndarray,
+    label1: int,
+    label2: int,
     alpha: float = 0.4
-) -> Tuple[np.ndarray, float]:
+) -> Tuple[np.ndarray, int]:
     """
-    Mixup augmentation for two waveforms
+    Mixup augmentation for two waveforms (same length expected)
+
+    - Label follows OR logic: if either is cry (1), result is cry (1)
 
     Args:
         waveform1: First waveform
-        waveform2: Second waveform
+        waveform2: Second waveform (same length as waveform1)
+        label1: Label of first waveform (0 or 1)
+        label2: Label of second waveform (0 or 1)
         alpha: Beta distribution parameter for mixup
 
     Returns:
-        Tuple of (mixed waveform, mixup coefficient)
+        Tuple of (mixed waveform, mixed label)
     """
     # Sample mixup coefficient from Beta distribution
     lam = np.random.beta(alpha, alpha)
 
-    # Ensure same length
-    min_len = min(len(waveform1), len(waveform2))
+    # Mix waveforms
+    mixed = lam * waveform1 + (1 - lam) * waveform2
 
-    mixed = lam * waveform1[:min_len] + (1 - lam) * waveform2[:min_len]
+    # OR logic for label: if either is cry, result is cry
+    mixed_label = label1 | label2  # Assuming labels are binary (0 or 1)
 
-    return mixed.astype(waveform1.dtype), lam
+    return mixed.astype(waveform1.dtype), mixed_label
 
 
 def mixup_batch(
     waveforms: np.ndarray,
     labels: np.ndarray,
-    alpha: float = 0.4,
-    num_classes: Optional[int] = None
+    alpha: float = 0.4
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Batch-level mixup augmentation
-
-    Randomly shuffles batch and mixes with original, returning mixed samples
-    and soft labels (for use with cross-entropy loss).
+    Batch-level mixup augmentation (all waveforms same length)
 
     Args:
         waveforms: Batch of waveforms, shape (batch_size, seq_len)
-        labels: Batch of labels, shape (batch_size,) - integer class indices
+        labels: Batch of labels, shape (batch_size,) - integer class indices (0 or 1)
         alpha: Beta distribution parameter for mixup
-        num_classes: Number of classes (inferred from labels if None)
 
     Returns:
-        Tuple of (mixed waveforms, soft labels)
+        Tuple of (mixed waveforms, mixed labels)
         - mixed waveforms: shape (batch_size, seq_len)
-        - soft labels: shape (batch_size, num_classes) - one-hot mixed labels
+        - mixed labels: shape (batch_size,) - OR of original labels
     """
     batch_size = len(waveforms)
-
-    if num_classes is None:
-        num_classes = int(np.max(labels)) + 1
 
     # Sample mixup coefficient from Beta distribution
     lam = np.random.beta(alpha, alpha)
@@ -389,61 +613,10 @@ def mixup_batch(
     # Mix waveforms
     mixed_waveforms = lam * waveforms + (1 - lam) * waveforms[shuffle_idx]
 
-    # Create soft labels (one-hot then mix)
-    # For efficiency, we return (labels, shuffled_labels, lam) tuple
-    # The loss function should compute: lam * CE(pred, labels) + (1-lam) * CE(pred, shuffled_labels)
-    # This avoids creating large one-hot matrices
-    shuffled_labels = labels[shuffle_idx]
+    # OR logic for labels
+    mixed_labels = np.maximum(labels, labels[shuffle_idx])
 
-    return mixed_waveforms.astype(waveforms.dtype), labels, shuffled_labels, lam
-
-
-def mixup_batch_soft(
-    waveforms: np.ndarray,
-    labels: np.ndarray,
-    alpha: float = 0.4,
-    num_classes: Optional[int] = None
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Batch-level mixup with explicit soft labels
-
-    Args:
-        waveforms: Batch of waveforms, shape (batch_size, seq_len)
-        labels: Batch of labels, shape (batch_size,) - integer class indices
-        alpha: Beta distribution parameter for mixup
-        num_classes: Number of classes (inferred from labels if None)
-
-    Returns:
-        Tuple of (mixed waveforms, soft labels)
-        - mixed waveforms: shape (batch_size, seq_len)
-        - soft labels: shape (batch_size, num_classes)
-    """
-    batch_size = len(waveforms)
-
-    if num_classes is None:
-        num_classes = int(np.max(labels)) + 1
-
-    # Sample mixup coefficient from Beta distribution
-    lam = np.random.beta(alpha, alpha)
-
-    # Shuffle indices
-    shuffle_idx = np.random.permutation(batch_size)
-
-    # Mix waveforms
-    mixed_waveforms = lam * waveforms + (1 - lam) * waveforms[shuffle_idx]
-
-    # Create one-hot labels
-    one_hot_labels = np.zeros((batch_size, num_classes), dtype=np.float32)
-    one_hot_labels[np.arange(batch_size), labels] = 1.0
-
-    # Create shuffled one-hot labels
-    one_hot_shuffled = np.zeros((batch_size, num_classes), dtype=np.float32)
-    one_hot_shuffled[np.arange(batch_size), labels[shuffle_idx]] = 1.0
-
-    # Mix labels
-    soft_labels = lam * one_hot_labels + (1 - lam) * one_hot_shuffled
-
-    return mixed_waveforms.astype(waveforms.dtype), soft_labels
+    return mixed_waveforms.astype(waveforms.dtype), mixed_labels
 
 
 class MixupCollateFn:
@@ -451,14 +624,15 @@ class MixupCollateFn:
     Collate function with mixup augmentation for DataLoader
 
     Binary classification: cry (1) vs non-cry (0)
-    Any label containing 'cry' is treated as positive class.
+    - Any label containing 'cry' is treated as positive class
+    - Mixup label follows OR logic: if either sample is cry, result is cry
+    - All waveforms expected to have same length (padded by dataset)
 
     Example:
         >>> collate_fn = MixupCollateFn(alpha=0.4, mixup_prob=0.5)
         >>> dataloader = DataLoader(dataset, batch_size=32, collate_fn=collate_fn)
-        >>> for waveforms, labels_a, labels_b, lam in dataloader:
-        ...     loss = lam * criterion(model(waveforms), labels_a) + \
-        ...            (1 - lam) * criterion(model(waveforms), labels_b)
+        >>> for waveforms, labels in dataloader:
+        ...     loss = criterion(model(waveforms), labels)
     """
 
     def __init__(
@@ -483,7 +657,7 @@ class MixupCollateFn:
     def __call__(
         self,
         batch: List[Tuple[np.ndarray, str]]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Collate a batch of samples with optional mixup
 
@@ -491,71 +665,34 @@ class MixupCollateFn:
             batch: List of (waveform, label) tuples
 
         Returns:
-            (waveforms, labels_a, labels_b, lam)
+            (waveforms, labels)
             - waveforms: torch.Tensor, shape (batch_size, seq_len)
-            - labels_a: torch.Tensor, shape (batch_size,) - original labels
-            - labels_b: torch.Tensor, shape (batch_size,) - shuffled labels
-            - lam: float - mixup coefficient (1.0 if no mixup)
+            - labels: torch.Tensor, shape (batch_size,) - binary labels (0 or 1)
         """
         # Separate waveforms and labels
         waveforms = [item[0] for item in batch]
         labels_str = [item[1] for item in batch]
 
-        # Stack waveforms into array (pad to max length)
-        max_len = max(len(w) for w in waveforms)
-        waveforms_padded = np.zeros((len(waveforms), max_len), dtype=np.float32)
-        for i, w in enumerate(waveforms):
-            waveforms_padded[i, :len(w)] = w
+        # Stack waveforms (all same length from dataset)
+        waveforms_stacked = np.stack(waveforms, axis=0).astype(np.float32)
 
         # Convert string labels to binary indices (cry=1, non-cry=0)
         labels = np.array([self._label_to_idx(label) for label in labels_str], dtype=np.int64)
 
         # Decide whether to apply mixup
         if np.random.random() < self.mixup_prob and self.alpha > 0:
-            mixed_waveforms, labels_a, labels_b, lam = mixup_batch(
-                waveforms_padded, labels, self.alpha, num_classes=2
+            mixed_waveforms, mixed_labels = mixup_batch(
+                waveforms_stacked, labels, self.alpha
             )
             return (
                 torch.from_numpy(mixed_waveforms),
-                torch.from_numpy(labels_a),
-                torch.from_numpy(labels_b),
-                lam
+                torch.from_numpy(mixed_labels)
             )
         else:
-            # No mixup - return original batch with lam=1.0
             return (
-                torch.from_numpy(waveforms_padded),
-                torch.from_numpy(labels),
-                torch.from_numpy(labels),
-                1.0
+                torch.from_numpy(waveforms_stacked),
+                torch.from_numpy(labels)
             )
-
-
-def mixup_criterion(
-    criterion: Callable,
-    predictions: torch.Tensor,
-    labels_a: torch.Tensor,
-    labels_b: torch.Tensor,
-    lam: float
-) -> torch.Tensor:
-    """
-    Compute mixup loss from standard criterion
-
-    Args:
-        criterion: Loss function that takes (predictions, labels)
-        predictions: Model outputs, shape (batch_size, num_classes)
-        labels_a: First set of labels, shape (batch_size,)
-        labels_b: Second set of labels (shuffled), shape (batch_size,)
-        lam: Mixup coefficient
-
-    Returns:
-        Mixed loss value
-
-    Example:
-        >>> criterion = torch.nn.CrossEntropyLoss()
-        >>> loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
-    """
-    return lam * criterion(predictions, labels_a) + (1 - lam) * criterion(predictions, labels_b)
 
 
 def spec_augment(

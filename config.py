@@ -12,12 +12,20 @@ import yaml
 @dataclass
 class AugmentationConfig:
     """Data augmentation configuration"""
-    mixup_alpha: Optional[float] = None
-    mask_rate: Optional[float] = None
-    noise_rate: Optional[float] = None
-    pitch_shift: Optional[float] = None
-    reverb_rate: Optional[float] = None
-    gain_db: Optional[float] = None
+    # Cry augmentation
+    cry_aug_rate: float = 0.5      # Probability of applying augmentation to cry samples
+    cry_mix_rate: float = 0.3      # Probability of mixing cry with non-cry sample
+    cry_mix_mean: float = 0.5      # Mean of Gaussian distribution for mix_rate
+    cry_mix_std: float = 0.15      # Std of Gaussian distribution for mix_rate
+    # Non-cry augmentation
+    non_cry_aug_rate: float = 0.5  # Probability of applying augmentation to non-cry samples
+    # Pitch shift range (semitones)
+    pitch_shift: float = 2.0
+    # Individual effect probabilities
+    pitch_prob: float = 0.5
+    reverb_prob: float = 0.5
+    phaser_prob: float = 0.5
+    echo_prob: float = 0.5
 
 
 @dataclass
@@ -59,7 +67,6 @@ class DatasetConfig:
     stride: float = 3.0
     cry_rate: float = 0.5
     cache_dir: Optional[str] = './audio_cache'
-    use_cache: bool = True
     force_mono: bool = True
     aug_config: AugmentationConfig = field(default_factory=AugmentationConfig)
     feature_config: FeatureConfig = field(default_factory=FeatureConfig)
@@ -150,12 +157,16 @@ def _dict_to_config(yaml_dict: Dict[str, Any]) -> Config:
     # Parse augmentation config
     aug_dict = yaml_dict.get('augmentation', {})
     aug_config = AugmentationConfig(
-        mixup_alpha=aug_dict.get('mixup_alpha'),
-        mask_rate=aug_dict.get('mask_rate'),
-        noise_rate=aug_dict.get('noise_rate'),
-        pitch_shift=aug_dict.get('pitch_shift'),
-        reverb_rate=aug_dict.get('reverb_rate'),
-        gain_db=aug_dict.get('gain_db'),
+        cry_aug_rate=aug_dict.get('cry_aug_rate', 0.5),
+        cry_mix_rate=aug_dict.get('cry_mix_rate', 0.3),
+        cry_mix_mean=aug_dict.get('cry_mix_mean', 0.5),
+        cry_mix_std=aug_dict.get('cry_mix_std', 0.15),
+        non_cry_aug_rate=aug_dict.get('non_cry_aug_rate', 0.5),
+        pitch_shift=aug_dict.get('pitch_shift', 2.0),
+        pitch_prob=aug_dict.get('pitch_prob', 0.5),
+        reverb_prob=aug_dict.get('reverb_prob', 0.5),
+        phaser_prob=aug_dict.get('phaser_prob', 0.5),
+        echo_prob=aug_dict.get('echo_prob', 0.5),
     )
 
     # Parse dataset config

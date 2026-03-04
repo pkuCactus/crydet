@@ -2,6 +2,8 @@
 Cry Detection Dataset and DataLoader
 """
 
+import hashlib
+import json
 import logging
 import os
 import random
@@ -10,7 +12,7 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 import tqdm
-from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data import Dataset
 
 from .audio_reader import AudioReader
 from .augmentation import AudioAugmenter
@@ -33,31 +35,36 @@ class CryDataset(Dataset):
         self.audio_reader = AudioReader(
             target_sr=config.sample_rate,
             cache_dir=config.cache_dir,
-            use_cache=config.use_cache,
             force_mono=config.force_mono
         )
         self.config = config
         self.data_dict = data_dict
         self.use_augmentation = use_augmentation
 
+        # 构建文件调度字典
+        self._get_schedule_dict()
+
         # Initialize augmenter if enabled
         self.augmenter: Optional[AudioAugmenter] = None
-        if use_augmentation and config.aug_config:
+        if config.aug_config is not None:
             aug = config.aug_config
             self.augmenter = AudioAugmenter(
-                noise_rate=aug.noise_rate,
-                mask_rate=aug.mask_rate,
-                pitch_shift=aug.pitch_shift,
-                reverb_rate=aug.reverb_rate,
-                gain_db=aug.gain_db,
-                sample_rate=config.sample_rate
+                sample_rate=config.sample_rate,
+                audio_reader=self.audio_reader,
+                cry_aug_rate=aug.cry_aug_rate if aug else 0.5,
+                cry_mix_rate=aug.cry_mix_rate if aug else 0.3,
+                cry_mix_mean=aug.cry_mix_mean if aug else 0.5,
+                cry_mix_std=aug.cry_mix_std if aug else 0.15,
+                non_cry_aug_rate=aug.non_cry_aug_rate if aug else 0.5,
+                pitch_shift=aug.pitch_shift if aug else 2.0,
+                pitch_prob=aug.pitch_prob if aug else 0.5,
+                reverb_prob=aug.reverb_prob if aug else 0.5,
+                phaser_prob=aug.phaser_prob if aug else 0.5,
+                echo_prob=aug.echo_prob if aug else 0.5
             )
-
-        # 构建文件调度字典
-        self.file_schedule_dict = self._get_schedule_dict(data_dict)
-        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
-                              for _ in range(self.data_dict[label][0])]
-        self._num_samples = {label: len(schedules) for label, schedules in self.file_schedule_dict.items()}
+            # Pass file schedule dict to augmenter for mixup
+            self.augmenter.file_schedule_dict = self.file_schedule_dict
+            self.augmenter.set_slice_len(config.slice_len)
 
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index
@@ -72,9 +79,9 @@ class CryDataset(Dataset):
             target_samples = int(self.config.slice_len * self.config.sample_rate)
             waveform = self._pad_waveform(waveform, target_samples)
 
-        # Apply augmentation if enabled
+        # Apply augmentation if enabled (all logic encapsulated in augmenter)
         if self.augmenter is not None:
-            waveform = self.augmenter(waveform)
+            waveform = self.augmenter.augment(waveform, label)
 
         return waveform, label
 
@@ -121,11 +128,17 @@ class CryDataset(Dataset):
         self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
                               for _ in range(self.data_dict[label][0])]
         self._num_samples = {label: len(schedules) for label, schedules in self.file_schedule_dict.items()}
+        # Sync with augmenter
+        if self.augmenter is not None:
+            self.augmenter.file_schedule_dict = self.file_schedule_dict
 
     def shuffle(self):
         """Shuffle file schedules for each label"""
         for label in self.file_schedule_dict:
             random.shuffle(self.file_schedule_dict[label])
+        # Sync with augmenter after shuffle
+        if self.augmenter is not None:
+            self.augmenter.file_schedule_dict = self.file_schedule_dict
 
     @property
     def other_labels(self):
@@ -136,17 +149,53 @@ class CryDataset(Dataset):
         return self._num_samples
 
     def _get_file_infos(self, data_dir: str) -> list:
+        """
+        Get file information from directory with caching support
+
+        Args:
+            data_dir: Directory path to search for audio files
+
+        Returns:
+            List of (file_path, duration) tuples
+        """
+        # Generate cache file path based on directory and config
+        cache_key = f"{data_dir}_{self.config.audio_suffixes}"
+        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
+        cache_file = os.path.join(self.config.cache_dir, f"{data_dir}_{cache_hash}.json")
+
+        # Try to load from cache
+        if self.config.use_cache and os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                return cached_data
+            except (json.JSONDecodeError, KeyError) as e:
+                raise ValueError(f"Failed to load cache: {e}, rescanning...")
+
+        # Scan directory for audio files
         file_infos = []
-        for root, _, files in tqdm.tqdm(os.walk(data_dir)):
+        for root, _, files in tqdm.tqdm(os.walk(data_dir), desc=f"Scanning {data_dir}"):
             for file in files:
-                if file.lower().endswith(self.config.audio_suffixes):
-                    file_abs_path = os.path.join(root, file)
-                    try:
-                        duration = sf.info(file_abs_path).duration
-                    except RuntimeError:
-                        print(f"Warning: Could not read audio info for {file_abs_path}, skipping.")
-                        continue
-                    file_infos.append((file_abs_path, duration))
+                if not file.lower().endswith(self.config.audio_suffixes):
+                    continue
+                file_abs_path = os.path.join(root, file)
+                try:
+                    duration = sf.info(file_abs_path).duration
+                except RuntimeError:
+                    LOGGER.warning(f"Could not read audio info for {file_abs_path}, skipping.")
+                    continue
+                file_infos.append((file_abs_path, duration))
+
+        # Save to cache
+        if self.config.use_cache and self.config.cache_dir:
+            os.makedirs(self.config.cache_dir, exist_ok=True)
+            try:
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(file_infos, f, ensure_ascii=False, indent=2)
+                LOGGER.info(f"Saved {len(file_infos)} file infos to cache: {cache_file}")
+            except IOError as e:
+                raise ValueError(f"Failed to save cache: {e}")
+
         return file_infos
 
     def _get_file_schedule(self, file_infos: list) -> list:
