@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, '..')
 
 import json
+import time
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
@@ -138,20 +139,17 @@ def main():
 
     # 5. 遍历数据
     print("\n[5] 遍历数据批次")
+    tm = time.time()
     for batch_idx, (waveforms, labels) in enumerate(dataloader):
+        print(time.time() - tm)
+        tm = time.time()
         print(f"\n    Batch {batch_idx + 1}:")
         print(f"      - 波形形状: {waveforms.shape}")
         print(f"      - 标签: {labels[:5]}... (共 {len(labels)} 个)")
 
-        # 统计标签分布
-        unique_labels = torch.unique(labels)
-        for label in unique_labels:
-            count = (labels == label).sum().item()
-            print(f"      - {label}: {count} 个样本")
-
         # 只展示前3个批次
-        if batch_idx >= 2:
-            print("\n    ... (仅展示前3个批次)")
+        if batch_idx >= 5:
+            print("\n    ... (仅展示前5个批次)")
             break
 
     # 6. 缓存信息
