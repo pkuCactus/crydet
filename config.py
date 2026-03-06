@@ -146,6 +146,11 @@ class DatasetConfig:
     cache_dir: Optional[str] = './audio_cache'
     force_mono: bool = True
 
+    def __post_init__(self):
+        """Ensure audio_suffixes is always a tuple"""
+        if isinstance(self.audio_suffixes, list):
+            self.audio_suffixes = tuple(self.audio_suffixes)
+
 
 @dataclass
 class ModelConfig:
