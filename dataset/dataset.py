@@ -41,7 +41,7 @@ class CryDataset(Dataset):
         self.data_dict = data_dict
 
         # 构建文件调度字典
-        self._get_schedule_dict()
+        self.generate_schedule()
 
         # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
