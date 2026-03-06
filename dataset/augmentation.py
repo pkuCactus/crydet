@@ -3,93 +3,45 @@ Audio Augmentation Utilities
 Supports various augmentation techniques for audio classification
 """
 
-import numpy as np
-import torch
 import random
-from typing import Optional, Tuple, List, Union, Dict, TYPE_CHECKING
+from typing import Optional, Tuple, List, Dict
 
-if TYPE_CHECKING:
-    from .audio_reader import AudioReader
-
+import librosa
+import numpy as np
+import sox
+import torch
 from scipy import signal
 
-try:
-    import librosa
-    HAS_LIBROSA = True
-except ImportError:
-    HAS_LIBROSA = False
+from config import AugmentationConfig
+from dataset.audio_reader import AudioReader
+from dataset import utils
 
 
 class AudioAugmenter:
     """
     Audio augmentation with label-aware enhancement chains
-
-    Cry samples:
-        - cry_aug_rate: probability of applying pitch/reverb/phaser
-        - cry_mix_rate: probability of mixing with non-cry sample
-        - When mixing, mix_rate is sampled from Gaussian(cry_mix_mean, cry_mix_std)
-
-    Non-cry samples:
-        - non_cry_aug_rate: probability of applying pitch/reverb/phaser/echo
-
-    The augmenter encapsulates all augmentation logic internally, including
-    loading non-cry samples for mixup when needed.
     """
 
     def __init__(
         self,
+        config: 'AugmentationConfig',
         sample_rate: int = 16000,
         audio_reader: Optional['AudioReader'] = None,
-        # Cry augmentation
-        cry_aug_rate: float = 0.5,
-        cry_mix_rate: float = 0.3,
-        cry_mix_mean: float = 0.5,
-        cry_mix_std: float = 0.15,
-        # Non-cry augmentation
-        non_cry_aug_rate: float = 0.5,
-        # Pitch shift range
-        pitch_shift: float = 2.0,
-        # Individual effect probabilities
-        pitch_prob: float = 0.5,
-        reverb_prob: float = 0.5,
-        phaser_prob: float = 0.5,
-        echo_prob: float = 0.5
     ):
         """
-        Initialize augmenter
+        Initialize augmenter with config
 
         Args:
+            config: AugmentationConfig instance containing all augmentation parameters
             sample_rate: Audio sample rate
             audio_reader: AudioReader instance for loading audio files
-            cry_aug_rate: Probability of applying augmentation to cry samples
-            cry_mix_rate: Probability of mixing cry with non-cry sample
-            cry_mix_mean: Mean of Gaussian distribution for mix_rate
-            cry_mix_std: Std of Gaussian distribution for mix_rate
-            non_cry_aug_rate: Probability of applying augmentation to non-cry samples
-            pitch_shift: Pitch shift range in semitones
-            pitch_prob: Probability of applying pitch shift
-            reverb_prob: Probability of applying reverb
-            phaser_prob: Probability of applying phaser
-            echo_prob: Probability of applying echo
         """
+        self.config = config
         self.sample_rate = sample_rate
         self._audio_reader = audio_reader
-        self.cry_aug_rate = cry_aug_rate
-        self.cry_mix_rate = cry_mix_rate
-        self.cry_mix_mean = cry_mix_mean
-        self.cry_mix_std = cry_mix_std
-        self.non_cry_aug_rate = non_cry_aug_rate
-        self.pitch_shift = pitch_shift
-        self.pitch_prob = pitch_prob
-        self.reverb_prob = reverb_prob
-        self.phaser_prob = phaser_prob
-        self.echo_prob = echo_prob
 
         # Internal state for mixup
         self._file_schedule_dict: Dict[str, List] = {}
-        self._non_cry_labels: List[str] = []
-        self._num_samples: Dict[str, int] = {}
-        self._slice_len: float = 1.0  # Default slice length in seconds
 
     @property
     def audio_reader(self) -> Optional['AudioReader']:
@@ -116,129 +68,150 @@ class AudioAugmenter:
                    {label: [(file_path, start_time, actual_len, need_pad), ...]}
         """
         self._file_schedule_dict = value
-        self._non_cry_labels = [label for label in value if label != 'cry']
-        self._num_samples = {label: len(schedules) for label, schedules in value.items()}
-
-    def set_slice_len(self, slice_len: float):
-        """Set the slice length for padding"""
-        self._slice_len = slice_len
 
     def augment(
         self,
-        waveform: np.ndarray,
+        y: np.ndarray,
+        sr: int,
         label: str
     ) -> np.ndarray:
         """
-        Apply augmentation based on label (encapsulated method)
-
-        This method handles all augmentation logic internally, including
-        loading non-cry samples for mixup when needed.
+        Apply augmentation
 
         Args:
-            waveform: Input audio waveform
+            y: Input audio waveform
             label: Label string (e.g., 'cry', 'animal_world', 'news')
 
         Returns:
             Augmented waveform
         """
-        is_cry = label is not None and 'cry' in label.lower()
+        is_cry = label is not None and 'cry' == label.lower()
+        if not is_cry and random.random() < self.config.other_reverse_prob:
+            y = y[::-1]
+        is_mixup_front = random.random() < self.config.mixup_config.mix_front_prob
+        if is_mixup_front:
+            y = self._do_mixup(y)
+        # do other augment
+        is_aug = self.is_augment(label)
+        y_db = utils.get_db(y)
+        y_aug = np.copy(y)
+        tfm = sox.transform.Transformer()
+        def pitch():
+            pitch_rate = (random.random() - 0.5) * 4
+            tfm.pitch(n_semitones=pitch_rate)
+        def reverb():
+            params = {
+                'reverberance': random.random() * 80 + 20,
+                'high_freq_damping': random.random() * 100,
+                'room_scale': random.random() * 100,
+                'stero_depth': random.random() * 100,
+                'pre_delay': 0
+            }
+            tfm.reverb(**params)
+        def phaser():
+            params = {
+                'gain_in': random.random() * 0.5 + 0.5,
+                'gain_out': random.random() * 0.5 + 0.5,
+                'delay': random.randint(1, 5),
+                'decay': random.random() * 0.4 + 0.1,
+                'speed': random.random() * 1.9 + 0.1,
+                'modulation_shape': random.choice(['sinusoidal', 'triangular'])
+            }
+            tfm.phaser(**params)
+        def echo():
+            params = {
+                'gain_in': random.random() * 0.5 + 0.5,
+                'gain_out': random.random() * 0.5 + 0.5,
+                'n_echos': 1,
+                'delays': [random.randint(6, 60)],
+                'decays': [random.random() * 0.5]
+            }
+            tfm.echo(**params)
+        if is_aug:
+            chain = ['pitch', 'reverb', 'phaser']
+            if not is_cry:
+                chain.append('echo')
+            random.shuffle(chain)
+            for k in chain:
+                if random.random() < self.config[chain]:
+                    eval(chain)()
+            y_aug = tfm.build_array(input_array=y, sample_rate_in=sr)
+            y_aug = utils.pad_pcm(y_aug, y.shape[[0]], 1, 0)
+            if random.random() < self.config.noise_prob:
+                snr = random.random() * 20 + 10
+                y_aug = utils.add_noise(y_aug, snr=snr)
+            y_aug = utils.gain(y_aug, utils.get_db(y), abs=True)
+        if not is_mixup_front:
+            y_aug = self._do_mixup(y_aug)
+        if is_aug and random.random() < self.config.gain_prob:
+            if random.random() < 0.1:
+                gain_db = random.uniform(0, 10)
+            else:
+                gain_db = -100
+                while gain_db < -40:
+                    gain_db = -np.abs(random.gauss(0, 20))
+                y_aug_norm = librosa.util.normalize(y_aug)
+                y_aug = utils.gain(y_aug_norm, gain_db, abs=False)
+        return y_aug
 
-        if is_cry and self._non_cry_labels and self._audio_reader is not None:
-            # Try mixup for cry samples
-            if np.random.random() < self.cry_mix_rate:
-                # Load a random non-cry sample
-                non_cry_waveform = self._load_random_non_cry(waveform.shape[0])
-                if non_cry_waveform is not None:
-                    mix_rate = self._sample_mix_rate()
-                    # Apply effects first
-                    if np.random.random() < self.cry_aug_rate:
-                        effects = [
-                            ('pitch', self.pitch_prob),
-                            ('reverb', self.reverb_prob),
-                            ('phaser', self.phaser_prob)
-                        ]
-                        waveform = self._apply_effects(waveform, effects)
-                    # Apply mixup
-                    waveform = self.apply_mixup(waveform, non_cry_waveform, mix_rate)
-                    return self._normalize(waveform)
+    def is_augment(self, label: str):
+        aug_prob = random.random()
+        if label.lower() == 'cry':
+            return aug_prob < self.config.cry_aug_prob
+        return aug_prob < self.config.other_aug_prob
 
-            # No mixup, just apply effects
-            if np.random.random() < self.cry_aug_rate:
-                effects = [
-                    ('pitch', self.pitch_prob),
-                    ('reverb', self.reverb_prob),
-                    ('phaser', self.phaser_prob)
-                ]
-                waveform = self._apply_effects(waveform, effects)
+    def _do_mixup(self, y: np.ndarray):
+        y_mix = self._generate_mixup_sample(y)
+        st = random.randint(0, len(y) - len(y_mix))
+        y[st : st + len(y_mix)] += y_mix
+        return np.clip(y, -1, 1)
+
+    def _generate_mixup_sample(self, y: np.ndarray, label: str) -> Optional[np.ndarray]:
+        """Generate a mixup sample for a given label if applicable"""
+        mix_rate = self._compute_mixup_rate(is_cry=(label.lower() == 'cry'))
+        if mix_rate <= 0.0 or mix_rate >= 1.0:
+            return np.zeros_like(y)
+        y_mix = self._load_random_non_cry(len(y))
+        p = utils.get_p(y, y_mix, 1 - mix_rate)
+        scale = (1 - p) / p
+        temp = y_mix * scale
+        temp_db = utils.get_db(y_mix)
+        if scale > 1e6 or temp_db > -5:
+            # y_mix， y能力差异过大，或者增强的y_mix分贝过大
+            y_mix = librosa.util.normalize(y_mix)
         else:
-            # Non-cry augmentation
-            if np.random.random() < self.non_cry_aug_rate:
-                effects = [
-                    ('pitch', self.pitch_prob),
-                    ('reverb', self.reverb_prob),
-                    ('phaser', self.phaser_prob),
-                    ('echo', self.echo_prob)
-                ]
-                waveform = self._apply_effects(waveform, effects)
+            y_mix = np.clip(temp, -1, 1)
+        return y_mix
 
-        return self._normalize(waveform)
+    def _compute_mixup_rate(self, is_cry: bool = True) -> float:
+        """Compute mixup rate"""
+        mix_rate = -1.0
+        if is_cry and random.random() < self.config.mixup_config.cry_mix_prob:
+            while mix_rate <= 0.0 or mix_rate >= 1.0:
+                mix_rate = random.gauss(self.config.mixup_config.cry_mix_rate_mean,
+                                        self.config.mixup_config.cry_mix_rate_std)
+        elif not is_cry and random.random() < self.config.mixup_config.other_mix_prob:
+            mix_rate = random.random()
+        else:
+            return mix_rate
+        # 添加随机抖动，使mix_rate在0.1到0.65之间，避免完全没有mixup或完全mixup的情况
+        mix_rate = np.clip(mix_rate + np.random.gauss(0, 0.05), 0.1, 0.65)
+        return mix_rate
 
-    def _load_random_non_cry(self, target_length: int) -> Optional[np.ndarray]:
+    def _load_random_sampler(self) -> np.ndarray:
         """
-        Load a random non-cry sample for mixup
+        Load a random sample for mixup
 
         Args:
             target_length: Target length in samples for padding
 
         Returns:
-            Non-cry waveform or None if not available
+            waveform
         """
-        if not self._non_cry_labels or not self._audio_reader or not self._file_schedule_dict:
-            return None
-
-        try:
-            non_cry_label = random.choice(self._non_cry_labels)
-            num_samples = self._num_samples.get(non_cry_label, 0)
-            if num_samples == 0:
-                return None
-
-            non_cry_idx = random.randint(0, num_samples - 1)
-            non_cry_schedule = self._file_schedule_dict[non_cry_label][non_cry_idx]
-            non_cry_path, non_cry_start, non_cry_len, non_cry_need_pad = non_cry_schedule
-
-            non_cry_waveform, _ = self._audio_reader.load_by_time(
-                non_cry_path, non_cry_start, non_cry_start + non_cry_len
-            )
-
-            if non_cry_need_pad:
-                non_cry_waveform = self._pad_waveform(non_cry_waveform, target_length)
-
-            return non_cry_waveform
-        except Exception:
-            return None
-
-    def _pad_waveform(self, waveform: np.ndarray, target_length: int) -> np.ndarray:
-        """Pad waveform to target length"""
-        current_length = len(waveform)
-        pad_length = target_length - current_length
-
-        if pad_length <= 0:
-            return waveform
-
-        # Random choice: pad with zeros or noise
-        if random.random() < 0.5:
-            padding = np.zeros(pad_length, dtype=np.float32)
-        else:
-            noise_level = 0.01 * np.std(waveform) if np.std(waveform) > 0 else 0.001
-            padding = np.random.randn(pad_length).astype(np.float32) * noise_level
-
-        # Random choice: pad at start or end
-        if random.random() < 0.5:
-            waveform = np.concatenate([padding, waveform])
-        else:
-            waveform = np.concatenate([waveform, padding])
-
-        return waveform
+        selected_label = random.choice(list(self.file_schedule_dict.keys()))
+        file_path, offset, dur, is_needed_pad = random.choice(self.file_schedule_dict[selected_label])
+        y_mix, _ = self.audio_reader.load_by_time(file_path, offset, offset + dur)
+        return y_mix
 
     def _normalize(self, waveform: np.ndarray) -> np.ndarray:
         """Normalize waveform to prevent clipping"""
@@ -249,10 +222,9 @@ class AudioAugmenter:
 
     def __call__(
         self,
-        waveform: np.ndarray,
-        label: str = None,
-        non_cry_waveform: np.ndarray = None
-    ) -> Tuple[np.ndarray, bool, float]:
+        y: np.ndarray,
+        label: str
+    ) -> np.ndarray:
         """
         Apply augmentation based on label (backward compatible method)
 
@@ -262,46 +234,9 @@ class AudioAugmenter:
             non_cry_waveform: Optional non-cry waveform for mixup
 
         Returns:
-            Tuple of (augmented waveform, needs_mixup, mix_rate)
-            - augmented waveform: The augmented audio
-            - needs_mixup: Whether mixup is needed (only for cry samples)
-            - mix_rate: The mixing rate (sampled from Gaussian, in (0,1))
+            augmented waveform: The augmented audio
         """
-        is_cry = label is not None and 'cry' in label.lower()
-
-        needs_mixup = False
-        mix_rate = 0.0
-
-        if is_cry:
-            # Check if mixup is needed
-            if non_cry_waveform is not None and np.random.random() < self.cry_mix_rate:
-                needs_mixup = True
-                # Sample mix_rate from Gaussian, resample if not in (0, 1)
-                mix_rate = self._sample_mix_rate()
-
-            # Check if augmentation is needed
-            if np.random.random() < self.cry_aug_rate:
-                effects = [
-                    ('pitch', self.pitch_prob),
-                    ('reverb', self.reverb_prob),
-                    ('phaser', self.phaser_prob)
-                ]
-                waveform = self._apply_effects(waveform, effects)
-        else:
-            # Non-cry augmentation
-            if np.random.random() < self.non_cry_aug_rate:
-                effects = [
-                    ('pitch', self.pitch_prob),
-                    ('reverb', self.reverb_prob),
-                    ('phaser', self.phaser_prob),
-                    ('echo', self.echo_prob)
-                ]
-                waveform = self._apply_effects(waveform, effects)
-
-        # Normalize to prevent clipping
-        waveform = self._normalize(waveform)
-
-        return waveform, needs_mixup, mix_rate
+        return self.augment(y, label)
 
     def _sample_mix_rate(self, max_attempts: int = 100) -> float:
         """

@@ -47,24 +47,13 @@ class CryDataset(Dataset):
         # Initialize augmenter if enabled
         self.augmenter: Optional[AudioAugmenter] = None
         if config.aug_config is not None:
-            aug = config.aug_config
             self.augmenter = AudioAugmenter(
+                config=config.aug_config,
                 sample_rate=config.sample_rate,
                 audio_reader=self.audio_reader,
-                cry_aug_rate=aug.cry_aug_rate if aug else 0.5,
-                cry_mix_rate=aug.cry_mix_rate if aug else 0.3,
-                cry_mix_mean=aug.cry_mix_mean if aug else 0.5,
-                cry_mix_std=aug.cry_mix_std if aug else 0.15,
-                non_cry_aug_rate=aug.non_cry_aug_rate if aug else 0.5,
-                pitch_shift=aug.pitch_shift if aug else 2.0,
-                pitch_prob=aug.pitch_prob if aug else 0.5,
-                reverb_prob=aug.reverb_prob if aug else 0.5,
-                phaser_prob=aug.phaser_prob if aug else 0.5,
-                echo_prob=aug.echo_prob if aug else 0.5
             )
             # Pass file schedule dict to augmenter for mixup
             self.augmenter.file_schedule_dict = self.file_schedule_dict
-            self.augmenter.set_slice_len(config.slice_len)
 
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index
@@ -136,9 +125,6 @@ class CryDataset(Dataset):
         """Shuffle file schedules for each label"""
         for label in self.file_schedule_dict:
             random.shuffle(self.file_schedule_dict[label])
-        # Sync with augmenter after shuffle
-        if self.augmenter is not None:
-            self.augmenter.file_schedule_dict = self.file_schedule_dict
 
     @property
     def other_labels(self):

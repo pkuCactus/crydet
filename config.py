@@ -10,22 +10,58 @@ import yaml
 
 
 @dataclass
+class MixupConfig:
+    cry_mix_prob: float = 0.3
+    # 高斯采样mix_rate
+    cry_mix_rate_mean: float = 0.3
+    cry_mix_rate_std: float = 0.15
+    other_mix_prob: float = 0.3 # [0, 1)均匀采样mix_rate
+    mix_front_prob: float = 0.7
+
+
+@dataclass
 class AugmentationConfig:
     """Data augmentation configuration"""
-    # Cry augmentation
-    cry_aug_rate: float = 0.5      # Probability of applying augmentation to cry samples
-    cry_mix_rate: float = 0.3      # Probability of mixing cry with non-cry sample
-    cry_mix_mean: float = 0.5      # Mean of Gaussian distribution for mix_rate
-    cry_mix_std: float = 0.15      # Std of Gaussian distribution for mix_rate
-    # Non-cry augmentation
-    non_cry_aug_rate: float = 0.5  # Probability of applying augmentation to non-cry samples
-    # Pitch shift range (semitones)
-    pitch_shift: float = 2.0
+    # Mix up config
+    mixup_config: MixupConfig = field(default_factory=MixupConfig)
+    # Other augmentation Config
+    cry_aug_prob: float = 0.9
+    other_aug_prob: float = 0.6
+    other_reverse_prob: float = 0.5
     # Individual effect probabilities
     pitch_prob: float = 0.5
-    reverb_prob: float = 0.5
+    reverb_prob: float = 0.8
     phaser_prob: float = 0.5
     echo_prob: float = 0.5
+    noise_prob: float = 0.1
+    gain_prob: float = 0.9
+
+    # 字符串到属性名的映射（用于索引访问）
+    _key_map: Dict[str, str] = field(default_factory=lambda: {
+        'pitch': 'pitch_prob',
+        'reverb': 'reverb_prob',
+        'phaser': 'phaser_prob',
+        'echo': 'echo_prob',
+        'gain': 'gain_prob',
+    }, repr=False, compare=False)
+
+    def __getitem__(self, key):
+        """
+        支持索引访问
+
+        Args:
+            key: 字符串键名，支持简写（如 'pitch'）或完整名（如 'pitch_prob'）
+
+        Usage:
+            config['pitch']      # 等同于 config.pitch_prob
+            config['pitch_prob'] # 等同于 config.pitch_prob
+        """
+        # 先检查简写映射
+        if key in self._key_map:
+            key = self._key_map[key]
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(f"Unknown key: {key}")
 
 
 @dataclass

@@ -2,6 +2,7 @@
 .claude/
 .agents/
 .codemate/
+*.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

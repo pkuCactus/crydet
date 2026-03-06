@@ -61,3 +61,32 @@ def pad_pcm(y: np.ndarray, target_length: int, pad_silence_prob: float = 0.5, pa
     if random.random() < pad_front_prob:
         return np.concatenate([padding, y])
     return np.concatenate([y, padding])
+
+
+def add_noise(y: np.ndarray, snr: int = 5, return_noise: bool = False, silent_rate: float = 0.5, abs: bool = False):
+    if y.ndim == 2 and (not y.shape[0] or not y.shape[1]):
+        return y
+    if return_noise and random.random() < silent_rate:
+        return np.zeros_like(y)
+    noise = np.random.randn(*y.shape)
+    noise = np.nan_to_num(noise)
+    noise = noise - np.mean(noise)
+    y_power = np.linalg.norm(y) ** 2 / y.size
+    noise_var = y_power / np.power(10, (snr / 10))
+    noise = noise * (np.sqrt(noise_var) / np.std(noise))
+    result = noise if return_noise else y + noise
+    if abs:
+        result = np.abs(result)
+    result = np.nan_to_num(result)
+    return result
+
+
+def gain(y: np.ndarray, ref_db: float, abs: bool = False):
+    gain_energy = 10 ** (ref_db / 20)
+    if abs:
+        ori_energy = max(np.mean(y ** 2), 1e-8) ** 0.5
+        y_gain = y / ori_energy * gain_energy
+    else:
+        y_gain = y * gain_energy
+    y_gain = np.clip(y_gain, -1, 1)
+    return y_gain
