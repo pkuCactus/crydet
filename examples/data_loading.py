@@ -226,30 +226,5 @@ def main():
     print("=" * 70)
 
 
-def example_single_sample():
-    """示例：获取单个样本"""
-    audio_list_path = 'audio_list/sample.json'
-    config_path = 'configs/default.yaml'
-
-    if not Path(audio_list_path).exists() or not Path(config_path).exists():
-        print("配置文件不存在，跳过单个样本示例")
-        return
-
-    config = load_config(config_path)
-    data_dict = load_audio_list(audio_list_path)
-    aug_config = config.augmentation if config.training.use_augmentation else None
-    dataset = CryDataset(data_dict, config.dataset, aug_config=aug_config)
-
-    if len(dataset) > 0:
-        print("\n获取单个样本:")
-        # 获取 cry 类别的第一个样本
-        if 'cry' in dataset.file_schedule_dict and len(dataset.file_schedule_dict['cry']) > 0:
-            waveform, label = dataset[('cry', 0)]
-            print(f"  波形形状: {waveform.shape}")
-            print(f"  波形时长: {len(waveform) / config.dataset.sample_rate:.2f} 秒")
-            print(f"  标签: {label}")
-
-
 if __name__ == '__main__':
     main()
-    example_single_sample()
