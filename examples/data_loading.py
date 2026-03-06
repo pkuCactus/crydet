@@ -11,10 +11,65 @@ import time
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
+import soundfile as sf
 
 from dataset.dataset import CryDataset
 from dataset.sampler import CrySampler
 from config import load_config
+
+
+def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 100, sample_rate: int = 16000):
+    """
+    从数据集中读取样本并保存为 WAV 文件
+
+    Args:
+        dataset: CryDataset 实例
+        output_dir: 输出目录
+        num_samples: 要保存的样本数量
+        sample_rate: 采样率
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # 统计每个标签的计数
+    label_counts = {}
+
+    print(f"\n保存 {num_samples} 个样本到 {output_dir}/")
+
+    saved_count = 0
+    # 遍历所有标签
+    for label in dataset.file_schedule_dict:
+        schedules = dataset.file_schedule_dict[label]
+        for file_idx in range(len(schedules)):
+            if saved_count >= num_samples:
+                break
+
+            # 获取样本
+            waveform, ret_label = dataset[(label, file_idx)]
+
+            # 更新标签计数
+            if ret_label not in label_counts:
+                label_counts[ret_label] = 0
+            label_counts[ret_label] += 1
+
+            # 生成文件名: 标签_idx.wav
+            filename = f"{ret_label}_{label_counts[ret_label]}.wav"
+            filepath = output_path / filename
+
+            # 保存为 WAV 文件
+            sf.write(str(filepath), waveform, sample_rate)
+            saved_count += 1
+
+            if saved_count % 10 == 0:
+                print(f"  已保存 {saved_count}/{num_samples} 个样本")
+
+        if saved_count >= num_samples:
+            break
+
+    print(f"\n完成! 共保存 {saved_count} 个样本")
+    print(f"标签分布: {label_counts}")
+
+    return label_counts
 
 
 def load_audio_list(json_path: str) -> dict:
@@ -159,6 +214,15 @@ def main():
     print(f"    缓存目录: {cache_info['cache_dir']}")
     print(f"    缓存文件数: {cache_info['file_count']}")
     print(f"    缓存大小: {cache_info['total_size_mb']} MB")
+
+    # 7. 保存样本到 temp 目录
+    print("\n[7] 保存样本到 temp 目录")
+    save_samples_to_temp(
+        dataset=dataset,
+        output_dir='temp',
+        num_samples=100,
+        sample_rate=config.dataset.sample_rate
+    )
 
     print("\n" + "=" * 70)
     print("数据加载示例完成")
