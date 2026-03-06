@@ -196,7 +196,7 @@ class AudioAugmenter:
         else:
             return mix_rate
         # 添加随机抖动，使mix_rate在0.1到0.65之间，避免完全没有mixup或完全mixup的情况
-        mix_rate = np.clip(mix_rate + np.random.gauss(0, 0.05), 0.1, 0.65)
+        mix_rate = np.clip(mix_rate + random.gauss(0, 0.05), 0.1, 0.65)
         return mix_rate
 
     def _load_random_sample(self) -> np.ndarray:
