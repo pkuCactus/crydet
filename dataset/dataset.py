@@ -39,10 +39,6 @@ class CryDataset(Dataset):
         )
         self.config = config
         self.data_dict = data_dict
-
-        # 构建文件调度字典
-        self.generate_schedule()
-
         # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
         if aug_config is not None:
@@ -51,8 +47,9 @@ class CryDataset(Dataset):
                 sample_rate=config.sample_rate,
                 audio_reader=self.audio_reader,
             )
-            # Pass file schedule dict to augmenter for mixup
-            self.augmenter.file_schedule_dict = self.file_schedule_dict
+        # 构建文件调度字典
+        self.generate_schedule()
+
 
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index
