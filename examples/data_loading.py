@@ -53,7 +53,8 @@ def create_dataloader_from_config(
     data_dict = load_audio_list(audio_list_path)
 
     # 创建数据集
-    dataset = CryDataset(data_dict, config.dataset)
+    aug_config = config.augmentation if config.training.use_augmentation else None
+    dataset = CryDataset(data_dict, config.dataset, aug_config=aug_config)
 
     # 创建采样器
     sampler = CrySampler(
@@ -112,9 +113,11 @@ def main():
 
     # 3. 创建数据集
     print("\n[3] 创建数据集")
-    dataset = CryDataset(data_dict, config.dataset)
+    aug_config = config.augmentation if config.training.use_augmentation else None
+    dataset = CryDataset(data_dict, config.dataset, aug_config=aug_config)
     print(f"    数据集长度: {len(dataset)}")
     print(f"    类别样本数: {dataset.num_samples}")
+    print(f"    数据增强: {'启用' if aug_config else '禁用'}")
 
     # 4. 创建采样器和 DataLoader
     print("\n[4] 创建 DataLoader")
@@ -175,7 +178,8 @@ def example_single_sample():
 
     config = load_config(config_path)
     data_dict = load_audio_list(audio_list_path)
-    dataset = CryDataset(data_dict, config.dataset)
+    aug_config = config.augmentation if config.training.use_augmentation else None
+    dataset = CryDataset(data_dict, config.dataset, aug_config=aug_config)
 
     if len(dataset) > 0:
         print("\n获取单个样本:")
