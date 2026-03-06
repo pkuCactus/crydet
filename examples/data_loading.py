@@ -40,6 +40,8 @@ def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 1
     for label in dataset.file_schedule_dict:
         schedules = dataset.file_schedule_dict[label]
         saved_count = 0
+        sub_path = output_path / label
+        sub_path.mkdir(parents=True, exist_ok=True)
         for file_idx in range(len(schedules)):
             if saved_count >= num_samples:
                 break
@@ -54,16 +56,16 @@ def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 1
 
             # 生成文件名: 标签_idx.wav
             filename = f"{ret_label}_{label_counts[ret_label]}.wav"
-            filepath = output_path / filename
+            filepath = sub_path / filename
 
             # 保存为 WAV 文件
             sf.write(str(filepath), waveform, sample_rate)
             saved_count += 1
 
             if saved_count % 10 == 0:
-                print(f"  已保存 {saved_count}/{num_samples} 个样本")
+                print(f"  已保存 {label}: {saved_count}/{num_samples} 个样本")
 
-    print(f"\n完成! 共保存 {saved_count} 个样本")
+    print(f"\n完成! 共保存 {sum([v for _, v in label_counts])} 个样本")
     print(f"标签分布: {label_counts}")
 
     return label_counts
