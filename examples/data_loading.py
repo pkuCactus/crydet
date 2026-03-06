@@ -141,11 +141,11 @@ def main():
     print("\n[5] 遍历数据批次")
     tm = time.time()
     for batch_idx, (waveforms, labels) in enumerate(dataloader):
-        print(time.time() - tm)
-        tm = time.time()
         print(f"\n    Batch {batch_idx + 1}:")
+        print(f"      - batch读取时间: {time.time() - tm}s")
         print(f"      - 波形形状: {waveforms.shape}")
         print(f"      - 标签: {labels[:5]}... (共 {len(labels)} 个)")
+        tm = time.time()
 
         # 只展示前3个批次
         if batch_idx >= 5:
