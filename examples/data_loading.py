@@ -65,7 +65,7 @@ def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 1
             if saved_count % 10 == 0:
                 print(f"  已保存 {label}: {saved_count}/{num_samples} 个样本")
 
-    print(f"\n完成! 共保存 {sum([v for _, v in label_counts])} 个样本")
+    print(f"\n完成! 共保存 {sum([v for _, v in label_counts.items()])} 个样本")
     print(f"标签分布: {label_counts}")
 
     return label_counts
