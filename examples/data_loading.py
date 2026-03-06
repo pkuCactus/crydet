@@ -36,10 +36,10 @@ def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 1
 
     print(f"\n保存 {num_samples} 个样本到 {output_dir}/")
 
-    saved_count = 0
     # 遍历所有标签
     for label in dataset.file_schedule_dict:
         schedules = dataset.file_schedule_dict[label]
+        saved_count = 0
         for file_idx in range(len(schedules)):
             if saved_count >= num_samples:
                 break
@@ -62,9 +62,6 @@ def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 1
 
             if saved_count % 10 == 0:
                 print(f"  已保存 {saved_count}/{num_samples} 个样本")
-
-        if saved_count >= num_samples:
-            break
 
     print(f"\n完成! 共保存 {saved_count} 个样本")
     print(f"标签分布: {label_counts}")

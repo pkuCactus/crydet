@@ -19,18 +19,38 @@ from .augmentation import AudioAugmenter
 from config import DatasetConfig, AugmentationConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
+# Default minimum energy threshold for cry samples (in dB, relative to max)
+DEFAULT_CRY_MIN_ENERGY_DB = -40.0
 LOGGER = logging.getLogger(__name__)
+
+
+def compute_energy_db(waveform: np.ndarray) -> float:
+    """
+    Compute energy of waveform in dB (relative to full scale)
+
+    Args:
+        waveform: Audio waveform array
+
+    Returns:
+        Energy in dB (0 dB = max, negative values = quieter)
+    """
+    rms = np.sqrt(np.mean(waveform ** 2))
+    if rms < 1e-10:
+        return -100.0  # Essentially silent
+    db = 20 * np.log10(rms)
+    return float(db)
 
 
 class CryDataset(Dataset):
     """
-    Dataset for baby cry detection
+    Dataset for baby cry detection with low-energy cry filtering
     """
     def __init__(
         self,
         data_dict: dict,
         config: DatasetConfig,
         aug_config: Optional[AugmentationConfig] = None,
+        cry_min_energy_db: float = -40.0,
     ):
         self.audio_reader = AudioReader(
             target_sr=config.sample_rate,
@@ -39,6 +59,8 @@ class CryDataset(Dataset):
         )
         self.config = config
         self.data_dict = data_dict
+        self.cry_min_energy_db = cry_min_energy_db
+
         # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
         if aug_config is not None:
@@ -119,12 +141,65 @@ class CryDataset(Dataset):
     def generate_schedule(self):
         """Regenerate file schedules for the next epoch"""
         self.file_schedule_dict = self._get_schedule_dict(self.data_dict)
+
+        # Filter low-energy cry samples (preprocessing)
+        if 'cry' in self.file_schedule_dict:
+            original_count = len(self.file_schedule_dict['cry'])
+            self.file_schedule_dict['cry'] = self._filter_low_energy_samples(
+                self.file_schedule_dict['cry'],
+                min_energy_db=self.cry_min_energy_db
+            )
+            filtered_count = len(self.file_schedule_dict['cry'])
+            if filtered_count < original_count:
+                LOGGER.info(f"Filtered {original_count - filtered_count} low-energy cry samples "
+                           f"(threshold: {self.cry_min_energy_db} dB, remaining: {filtered_count})")
+
         self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
                               for _ in range(self.data_dict[label][0])]
         self._num_samples = {label: len(schedules) for label, schedules in self.file_schedule_dict.items()}
         # Sync with augmenter
         if self.augmenter is not None:
             self.augmenter.file_schedule_dict = self.file_schedule_dict
+
+    def _filter_low_energy_samples(
+        self,
+        schedules: List[Tuple[str, float, float, bool]],
+        min_energy_db: float
+    ) -> List[Tuple[str, float, float, bool]]:
+        """
+        Filter out samples with energy below threshold
+
+        Args:
+            schedules: List of (file_path, start_time, actual_len, need_pad) tuples
+            min_energy_db: Minimum energy threshold in dB
+
+        Returns:
+            Filtered list of schedules
+        """
+        valid_schedules = []
+
+        for file_path, start_time, actual_len, need_pad in tqdm.tqdm(
+            schedules, desc="Filtering low-energy cry samples", leave=False
+        ):
+            try:
+                # Load audio segment
+                waveform, _ = self.audio_reader.load_by_time(
+                    file_path, start_time, start_time + actual_len
+                )
+
+                # Compute energy
+                energy_db = compute_energy_db(waveform)
+
+                if energy_db >= min_energy_db:
+                    valid_schedules.append((file_path, start_time, actual_len, need_pad))
+                else:
+                    LOGGER.debug(f"Filtered: {file_path} @ {start_time:.2f}s (energy: {energy_db:.1f} dB)")
+
+            except Exception as e:
+                LOGGER.warning(f"Error loading {file_path} @ {start_time:.2f}s: {e}")
+                continue
+
+        return valid_schedules
 
     def shuffle(self):
         """Shuffle file schedules for each label"""
