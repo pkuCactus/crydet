@@ -141,7 +141,7 @@ def main():
     for batch_idx, (waveforms, labels) in enumerate(dataloader):
         print(f"\n    Batch {batch_idx + 1}:")
         print(f"      - 波形形状: {waveforms.shape}")
-        print(f"      - 标签: {labels[:5].tolist()}... (共 {len(labels)} 个)")
+        print(f"      - 标签: {labels[:5]}... (共 {len(labels)} 个)")
 
         # 统计标签分布
         unique_labels = torch.unique(labels)

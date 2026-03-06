@@ -3,9 +3,9 @@ Cry Detection Dataset and DataLoader
 """
 
 import hashlib
-import json
 import logging
 import os
+import pickle
 import random
 from typing import Optional, List, Tuple
 
@@ -149,19 +149,23 @@ class CryDataset(Dataset):
         Returns:
             List of (file_path, duration) tuples
         """
-        # Generate cache file path based on directory and config
-        cache_key = f"{data_dir}_{self.config.audio_suffixes}"
-        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
-        cache_file = os.path.join(self.config.cache_dir, f"{data_dir}_{cache_hash}.json")
+        # Generate cache file path using hash of directory path
+        dir_hash = hashlib.md5(data_dir.encode()).hexdigest()[:12]
+        cache_file = os.path.join(self.config.cache_dir, f"fileinfo_{dir_hash}.pkl")
+
+        # Get directory modification time for cache validation
+        dir_mtime = os.path.getmtime(data_dir)
 
         # Try to load from cache
-        if cache_file and os.path.exists(cache_file):
+        if os.path.exists(cache_file):
             try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    cached_data = json.load(f)
-                return cached_data
-            except (json.JSONDecodeError, KeyError) as e:
-                raise ValueError(f"Failed to load cache: {e}, rescanning...")
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                # Validate cache by checking directory mtime
+                if cached_data.get('mtime') == dir_mtime:
+                    return cached_data.get('file_infos', [])
+            except Exception as e:
+                LOGGER.warning(f"Cache load failed: {e}, rescanning...")
 
         # Scan directory for audio files
         file_infos = []
@@ -177,15 +181,20 @@ class CryDataset(Dataset):
                     continue
                 file_infos.append((file_abs_path, duration))
 
-        # Save to cache
+        # Save to cache with pickle (faster than JSON)
         if self.config.cache_dir:
             os.makedirs(self.config.cache_dir, exist_ok=True)
             try:
-                with open(cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(file_infos, f, ensure_ascii=False, indent=2)
+                cache_data = {
+                    'dir': data_dir,
+                    'mtime': dir_mtime,
+                    'file_infos': file_infos
+                }
+                with open(cache_file, 'wb') as f:
+                    pickle.dump(cache_data, f)
                 LOGGER.info(f"Saved {len(file_infos)} file infos to cache: {cache_file}")
             except IOError as e:
-                raise ValueError(f"Failed to save cache: {e}")
+                LOGGER.warning(f"Failed to save cache: {e}")
 
         return file_infos
 

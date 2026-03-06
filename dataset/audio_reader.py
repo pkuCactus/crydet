@@ -4,12 +4,10 @@ Supports partial reading and caching of resampled audio as WAV files
 """
 
 import json
-import hashlib
 import numpy as np
 import soundfile as sf
 from pathlib import Path
 from typing import Union, Optional, Tuple, List
-from scipy import signal
 
 
 class AudioReader:
@@ -49,6 +47,17 @@ class AudioReader:
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # Import librosa lazily for faster startup
+        self._librosa = None
+
+    @property
+    def librosa(self):
+        """Lazy import librosa"""
+        if self._librosa is None:
+            import librosa
+            self._librosa = librosa
+        return self._librosa
+
     def load(
         self,
         file_path: Union[str, Path],
@@ -86,13 +95,19 @@ class AudioReader:
         # Slow path: need resampling
         cache_path = self._get_cache_path(file_path, orig_sr)
 
-        # Check if cached WAV exists
+        # Check if cached WAV exists and is valid
         if self.cache_dir and cache_path.exists():
-            # Read from cached WAV with partial support
-            waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
-            if self.force_mono and waveform.ndim > 1:
-                waveform = np.mean(waveform, axis=1)
-            return waveform, self.target_sr
+            # Verify cache is not stale (check mtime)
+            cache_meta_path = cache_path.with_suffix('.json')
+            if cache_meta_path.exists():
+                with open(cache_meta_path, 'r') as f:
+                    meta = json.load(f)
+                # Cache is valid if source hasn't been modified
+                if meta.get('source_mtime') == file_path.stat().st_mtime_ns:
+                    waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
+                    if self.force_mono and waveform.ndim > 1:
+                        waveform = np.mean(waveform, axis=1)
+                    return waveform, self.target_sr
 
         # Load entire audio, resample, and cache
         waveform, _ = sf.read(file_path, dtype='float32')
@@ -100,7 +115,7 @@ class AudioReader:
         if self.force_mono and waveform.ndim > 1:
             waveform = np.mean(waveform, axis=1)
 
-        # Resample entire audio
+        # Resample using librosa (much faster than scipy)
         waveform = self._resample(waveform, orig_sr, self.target_sr)
 
         # Save as WAV for partial reading support
@@ -170,37 +185,33 @@ class AudioReader:
         orig_sr: int,
         target_sr: int
     ) -> np.ndarray:
-        """Resample audio using scipy.signal.resample"""
+        """Resample audio using librosa (much faster than scipy)"""
         if orig_sr == target_sr:
             return waveform
 
-        duration = len(waveform) / orig_sr
-        new_length = int(duration * target_sr)
-
+        # Use librosa.resample which is much faster
         if waveform.ndim > 1:
-            # Multi-channel
+            # Multi-channel: resample each channel
             resampled = np.stack([
-                signal.resample(waveform[ch], new_length)
+                self.librosa.resample(waveform[ch], orig_sr=orig_sr, target_sr=target_sr)
                 for ch in range(waveform.shape[0])
             ], axis=0)
         else:
-            # Single channel
-            resampled = signal.resample(waveform, new_length)
+            resampled = self.librosa.resample(waveform, orig_sr=orig_sr, target_sr=target_sr)
 
         return resampled.astype(np.float32)
 
-    def _compute_hash(self, file_path: Path) -> str:
-        """Compute MD5 hash of audio file"""
-        hasher = hashlib.md5()
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
     def _get_cache_path(self, file_path: Path, orig_sr: int) -> Path:
-        """Get cache file path for resampled audio (WAV format)"""
-        audio_hash = self._compute_hash(file_path)
-        return self.cache_dir / f"{audio_hash}_{orig_sr}to{self.target_sr}hz.wav"
+        """
+        Get cache file path using file mtime (much faster than MD5 hash)
+
+        Uses file stem + mtime + sample rate as cache key
+        """
+        # Use mtime for cache invalidation (nanosecond precision)
+        mtime = file_path.stat().st_mtime_ns
+        # Use file stem to make cache filename readable
+        safe_stem = "".join(c if c.isalnum() or c in '-_' else '_' for c in file_path.stem)
+        return self.cache_dir / f"{safe_stem}_{mtime}_{orig_sr}to{self.target_sr}hz.wav"
 
     def _save_to_cache(
         self,
@@ -213,10 +224,11 @@ class AudioReader:
         # Save as WAV
         sf.write(cache_path, waveform, self.target_sr)
 
-        # Save metadata
+        # Save metadata with mtime for cache validation
         meta_path = cache_path.with_suffix('.json')
         meta = {
             'source_path': str(source_path),
+            'source_mtime': source_path.stat().st_mtime_ns,
             'orig_sr': orig_sr,
             'target_sr': self.target_sr,
             'shape': list(waveform.shape),
