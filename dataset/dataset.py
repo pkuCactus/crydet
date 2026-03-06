@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import random
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import numpy as np
 import soundfile as sf
@@ -106,10 +106,19 @@ class CryDataset(Dataset):
 
         return waveform
 
-    def __len__(self):
-        others = sum(len(schedules) for label, schedules in self.file_schedule_dict.items() if label != 'cry')
-        cry = len(self.file_schedule_dict.get('cry', []))
-        return int(max(others / (1 - self.config.cry_rate), cry / self.config.cry_rate))
+    def __len__(self) -> int:
+        """Return the total number of samples per epoch based on cry rate"""
+        cry_count = len(self.file_schedule_dict.get('cry', []))
+        other_count = sum(
+            len(schedules)
+            for label, schedules in self.file_schedule_dict.items()
+            if label != 'cry'
+        )
+        # Calculate epoch size based on the limiting class
+        return int(max(
+            other_count / (1 - self.config.cry_rate),
+            cry_count / self.config.cry_rate
+        ))
 
     def generate_schedule(self):
         """Regenerate file schedules for the next epoch"""
@@ -127,14 +136,14 @@ class CryDataset(Dataset):
             random.shuffle(self.file_schedule_dict[label])
 
     @property
-    def other_labels(self):
+    def other_labels(self) -> List[str]:
         return self._other_labels
 
     @property
-    def num_samples(self):
+    def num_samples(self) -> dict:
         return self._num_samples
 
-    def _get_file_infos(self, data_dir: str) -> list:
+    def _get_file_infos(self, data_dir: str) -> List[Tuple[str, float]]:
         """
         Get file information from directory with caching support
 
@@ -184,41 +193,42 @@ class CryDataset(Dataset):
 
         return file_infos
 
-    def _get_file_schedule(self, file_infos: list) -> list:
+    def _get_file_schedule(self, file_infos: List[Tuple[str, float]]) -> List[Tuple[str, float, float, bool]]:
         """
-        生成文件调度列表
+        Generate file schedule list for sampling
 
-        规则:
-        - duration < MIN_DURATION: 跳过
-        - duration < slice_len: 取整个文件, 需要 pad
-        - duration >= slice_len: 随机选择起始位置 [0, 1), 按 stride 切分
+        Rules:
+        - duration < MIN_DURATION: skip
+        - duration < slice_len: use entire file, needs padding
+        - duration >= slice_len: slice with random start position using stride
 
         Returns:
-            [(file_path, start_time, actual_len, need_pad), ...]
+            List of (file_path, start_time, actual_len, need_pad) tuples
         """
         file_schedules = []
         slice_len = self.config.slice_len
         stride = self.config.stride
 
         for file_path, duration in file_infos:
-            # 跳过过短的音频
             if duration < MIN_DURATION:
                 LOGGER.warning(f"Skipping {file_path} due to short duration ({duration:.3f}s)")
                 continue
 
             if duration < slice_len:
-                # 短于 slice_len: 取整个文件, 需要 pad
+                # Short file: use entire file, needs padding
                 file_schedules.append((file_path, 0.0, duration, True))
+                continue
 
-            else:
-                # 长于等于 slice_len: 基于随机起始位置，按 stride 切分
-                s = random.random()
-                while s + slice_len <= duration:
-                    file_schedules.append((file_path, s, slice_len, False))
-                    s += stride
-                if s < duration and duration - s >= MIN_DURATION:
-                    # 最后一个片段不足 slice_len, 取剩余部分, 需要 pad
-                    file_schedules.append((file_path, s, duration - s, True))
+            # Long file: slice with random start position
+            current_pos = random.random() * (duration - slice_len)
+            while current_pos + slice_len <= duration:
+                file_schedules.append((file_path, current_pos, slice_len, False))
+                current_pos += stride
+
+            # Handle remaining segment if it's long enough
+            remaining = duration - current_pos
+            if remaining >= MIN_DURATION:
+                file_schedules.append((file_path, current_pos, remaining, True))
 
         return file_schedules
 

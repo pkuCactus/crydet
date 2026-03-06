@@ -72,7 +72,6 @@ class AudioAugmenter:
     def augment(
         self,
         y: np.ndarray,
-        sr: int,
         label: str
     ) -> np.ndarray:
         """
@@ -90,59 +89,27 @@ class AudioAugmenter:
             y = y[::-1]
         is_mixup_front = random.random() < self.config.mixup_config.mix_front_prob
         if is_mixup_front:
-            y = self._do_mixup(y)
+            y = self._do_mixup(y, label)
         # do other augment
         is_aug = self.is_augment(label)
-        y_db = utils.get_db(y)
         y_aug = np.copy(y)
         tfm = sox.transform.Transformer()
-        def pitch():
-            pitch_rate = (random.random() - 0.5) * 4
-            tfm.pitch(n_semitones=pitch_rate)
-        def reverb():
-            params = {
-                'reverberance': random.random() * 80 + 20,
-                'high_freq_damping': random.random() * 100,
-                'room_scale': random.random() * 100,
-                'stero_depth': random.random() * 100,
-                'pre_delay': 0
-            }
-            tfm.reverb(**params)
-        def phaser():
-            params = {
-                'gain_in': random.random() * 0.5 + 0.5,
-                'gain_out': random.random() * 0.5 + 0.5,
-                'delay': random.randint(1, 5),
-                'decay': random.random() * 0.4 + 0.1,
-                'speed': random.random() * 1.9 + 0.1,
-                'modulation_shape': random.choice(['sinusoidal', 'triangular'])
-            }
-            tfm.phaser(**params)
-        def echo():
-            params = {
-                'gain_in': random.random() * 0.5 + 0.5,
-                'gain_out': random.random() * 0.5 + 0.5,
-                'n_echos': 1,
-                'delays': [random.randint(6, 60)],
-                'decays': [random.random() * 0.5]
-            }
-            tfm.echo(**params)
         if is_aug:
             chain = ['pitch', 'reverb', 'phaser']
             if not is_cry:
                 chain.append('echo')
             random.shuffle(chain)
-            for k in chain:
-                if random.random() < self.config[chain]:
-                    eval(chain)()
-            y_aug = tfm.build_array(input_array=y, sample_rate_in=sr)
-            y_aug = utils.pad_pcm(y_aug, y.shape[[0]], 1, 0)
+            for effect_name in chain:
+                if random.random() < self.config[effect_name]:
+                    self._apply_effect(tfm, effect_name)
+            y_aug = tfm.build_array(input_array=y, sample_rate_in=self.sample_rate)
+            y_aug = utils.pad_pcm(y_aug, y.shape[0], 1, 0)
             if random.random() < self.config.noise_prob:
                 snr = random.random() * 20 + 10
                 y_aug = utils.add_noise(y_aug, snr=snr)
             y_aug = utils.gain(y_aug, utils.get_db(y), abs=True)
         if not is_mixup_front:
-            y_aug = self._do_mixup(y_aug)
+            y_aug = self._do_mixup(y_aug, label)
         if is_aug and random.random() < self.config.gain_prob:
             if random.random() < 0.1:
                 gain_db = random.uniform(0, 10)
@@ -154,24 +121,58 @@ class AudioAugmenter:
                 y_aug = utils.gain(y_aug_norm, gain_db, abs=False)
         return y_aug
 
-    def is_augment(self, label: str):
+    def is_augment(self, label: str) -> bool:
         aug_prob = random.random()
         if label.lower() == 'cry':
             return aug_prob < self.config.cry_aug_prob
         return aug_prob < self.config.other_aug_prob
 
-    def _do_mixup(self, y: np.ndarray):
-        y_mix = self._generate_mixup_sample(y)
+    def _apply_effect(self, tfm: sox.transform.Transformer, effect_name: str) -> None:
+        """Apply a single audio effect to the transformer"""
+        if effect_name == 'pitch':
+            pitch_rate = (random.random() - 0.5) * 4
+            tfm.pitch(n_semitones=pitch_rate)
+        elif effect_name == 'reverb':
+            params = {
+                'reverberance': random.random() * 80 + 20,
+                'high_freq_damping': random.random() * 100,
+                'room_scale': random.random() * 100,
+                'stero_depth': random.random() * 100,
+                'pre_delay': 0
+            }
+            tfm.reverb(**params)
+        elif effect_name == 'phaser':
+            params = {
+                'gain_in': random.random() * 0.5 + 0.5,
+                'gain_out': random.random() * 0.5 + 0.5,
+                'delay': random.randint(1, 5),
+                'decay': random.random() * 0.4 + 0.1,
+                'speed': random.random() * 1.9 + 0.1,
+                'modulation_shape': random.choice(['sinusoidal', 'triangular'])
+            }
+            tfm.phaser(**params)
+        elif effect_name == 'echo':
+            params = {
+                'gain_in': random.random() * 0.5 + 0.5,
+                'gain_out': random.random() * 0.5 + 0.5,
+                'n_echos': 1,
+                'delays': [random.randint(6, 60)],
+                'decays': [random.random() * 0.5]
+            }
+            tfm.echo(**params)
+
+    def _do_mixup(self, y: np.ndarray, label: Optional[str] = None) -> np.ndarray:
+        y_mix = self._generate_mixup_sample(y, label)
         st = random.randint(0, len(y) - len(y_mix))
         y[st : st + len(y_mix)] += y_mix
         return np.clip(y, -1, 1)
 
-    def _generate_mixup_sample(self, y: np.ndarray, label: str) -> Optional[np.ndarray]:
+    def _generate_mixup_sample(self, y: np.ndarray, label: Optional[str] = None) -> np.ndarray:
         """Generate a mixup sample for a given label if applicable"""
-        mix_rate = self._compute_mixup_rate(is_cry=(label.lower() == 'cry'))
-        if mix_rate <= 0.0 or mix_rate >= 1.0:
+        mix_rate = self._compute_mixup_rate(is_cry=(label and label.lower() == 'cry'))
+        if mix_rate <= 0.0 or mix_rate >= 1.0 or not self.file_schedule_dict:
             return np.zeros_like(y)
-        y_mix = self._load_random_non_cry(len(y))
+        y_mix = self._load_random_sample()
         p = utils.get_p(y, y_mix, 1 - mix_rate)
         scale = (1 - p) / p
         temp = y_mix * scale
@@ -198,18 +199,10 @@ class AudioAugmenter:
         mix_rate = np.clip(mix_rate + np.random.gauss(0, 0.05), 0.1, 0.65)
         return mix_rate
 
-    def _load_random_sampler(self) -> np.ndarray:
-        """
-        Load a random sample for mixup
-
-        Args:
-            target_length: Target length in samples for padding
-
-        Returns:
-            waveform
-        """
+    def _load_random_sample(self) -> np.ndarray:
+        """Load a random sample for mixup"""
         selected_label = random.choice(list(self.file_schedule_dict.keys()))
-        file_path, offset, dur, is_needed_pad = random.choice(self.file_schedule_dict[selected_label])
+        file_path, offset, dur, _ = random.choice(self.file_schedule_dict[selected_label])
         y_mix, _ = self.audio_reader.load_by_time(file_path, offset, offset + dur)
         return y_mix
 
@@ -224,9 +217,8 @@ class AudioAugmenter:
         Args:
             waveform: Input audio waveform
             label: Label string (e.g., 'cry', 'animal_world', 'news')
-            non_cry_waveform: Optional non-cry waveform for mixup
 
         Returns:
-            augmented waveform: The augmented audio
+            Augmented audio waveform
         """
         return self.augment(y, label)

@@ -63,7 +63,7 @@ def pad_pcm(y: np.ndarray, target_length: int, pad_silence_prob: float = 0.5, pa
     return np.concatenate([y, padding])
 
 
-def add_noise(y: np.ndarray, snr: int = 5, return_noise: bool = False, silent_rate: float = 0.5, abs: bool = False):
+def add_noise(y: np.ndarray, snr: int = 5, return_noise: bool = False, silent_rate: float = 0.5, abs: bool = False) -> np.ndarray:
     if y.ndim == 2 and (not y.shape[0] or not y.shape[1]):
         return y
     if return_noise and random.random() < silent_rate:
@@ -81,7 +81,7 @@ def add_noise(y: np.ndarray, snr: int = 5, return_noise: bool = False, silent_ra
     return result
 
 
-def gain(y: np.ndarray, ref_db: float, abs: bool = False):
+def gain(y: np.ndarray, ref_db: float, abs: bool = False) -> np.ndarray:
     gain_energy = 10 ** (ref_db / 20)
     if abs:
         ori_energy = max(np.mean(y ** 2), 1e-8) ** 0.5
