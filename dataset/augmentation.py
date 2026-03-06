@@ -197,11 +197,25 @@ class AudioAugmenter:
 
     def _generate_mixup_sample(self, y: np.ndarray, label: Optional[str] = None) -> np.ndarray:
         """Generate a mixup sample for a given label if applicable"""
-        mix_rate = self._compute_mixup_rate(is_cry=(label and label.lower() == 'cry'))
+        is_cry = label and label.lower() == 'cry'
+        mix_rate = self._compute_mixup_rate(is_cry=is_cry)
         if mix_rate <= 0.0 or mix_rate >= 1.0 or not self.file_schedule_dict:
             return np.zeros_like(y)
 
-        y_mix = self._get_mixup_sample()
+        # 非哭声只能混合非哭声样本
+        y_mix = self._get_mixup_sample(exclude_cry=(not is_cry))
+
+        # 哭声混合：混合样本能量要小于原始音频
+        if is_cry:
+            original_db = utils.get_db(y)
+            mix_db = utils.get_db(y_mix)
+            # 如果混合样本能量高于原始，降低其能量
+            if mix_db >= original_db:
+                # 降低能量到比原始低 3-10 dB
+                target_db_diff = random.uniform(3, 10)
+                gain_factor = 10 ** (-(mix_db - original_db + target_db_diff) / 20)
+                y_mix = y_mix * gain_factor
+
         p = utils.get_p(y, y_mix, 1 - mix_rate)
         scale = (1 - p) / p
         temp = y_mix * scale
@@ -226,40 +240,41 @@ class AudioAugmenter:
         mix_rate = np.clip(mix_rate + random.gauss(0, 0.05), 0.1, 0.65)
         return mix_rate
 
-    def _get_mixup_sample(self) -> np.ndarray:
+    def _get_mixup_sample(self, exclude_cry: bool = False) -> np.ndarray:
         """
         Get a mixup sample from pool or load from disk.
-        With probability _refresh_prob, replace a random pool sample with new one.
+
+        Args:
+            exclude_cry: If True, only select from non-cry labels
+
+        Returns:
+            Mixup sample waveform
         """
-        # Lazy initialize pool
-        self._init_pool()
+        # 直接从磁盘加载（池化逻辑暂时跳过，因为需要支持 exclude_cry）
+        return self._load_random_sample_from_disk(exclude_cry=exclude_cry)
 
-        # If pool is still empty, load from disk
-        if not self._mixup_pool:
-            return self._load_random_sample_from_disk()
+    def _load_random_sample_from_disk(self, exclude_cry: bool = False) -> np.ndarray:
+        """
+        Load a random sample from disk for mixup
 
-        # Get sample from pool
-        sample = random.choice(self._mixup_pool)
+        Args:
+            exclude_cry: If True, only select from non-cry labels
 
-        # With some probability, refresh pool by replacing a random sample
-        # This maintains diversity without frequent disk I/O
-        if random.random() < self._refresh_prob:
-            try:
-                new_sample = self._load_random_sample_from_disk()
-                if new_sample is not None:
-                    replace_idx = random.randint(0, len(self._mixup_pool) - 1)
-                    self._mixup_pool[replace_idx] = new_sample
-            except Exception:
-                pass
-
-        return sample.copy()
-
-    def _load_random_sample_from_disk(self) -> np.ndarray:
-        """Load a random sample from disk for mixup"""
+        Returns:
+            Mixup sample waveform
+        """
         if not self._file_schedule_dict:
             return np.zeros(80000, dtype=np.float32)  # Default 5s at 16kHz
 
-        selected_label = random.choice(list(self._file_schedule_dict.keys()))
+        # 获取可选的标签列表
+        available_labels = list(self._file_schedule_dict.keys())
+        if exclude_cry:
+            available_labels = [l for l in available_labels if l.lower() != 'cry']
+
+        if not available_labels:
+            return np.zeros(80000, dtype=np.float32)
+
+        selected_label = random.choice(available_labels)
         file_path, offset, dur, _ = random.choice(self._file_schedule_dict[selected_label])
         y_mix, _ = self.audio_reader.load_by_time(file_path, offset, offset + dur)
         return y_mix
