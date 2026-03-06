@@ -87,7 +87,7 @@ class AudioAugmenter:
         is_cry = label is not None and 'cry' == label.lower()
         if not is_cry and random.random() < self.config.other_reverse_prob:
             y = y[::-1]
-        is_mixup_front = random.random() < self.config.mixup_config.mix_front_prob
+        is_mixup_front = random.random() < self.config.mixup.mix_front_prob
         if is_mixup_front:
             y = self._do_mixup(y, label)
         # do other augment
@@ -187,11 +187,11 @@ class AudioAugmenter:
     def _compute_mixup_rate(self, is_cry: bool = True) -> float:
         """Compute mixup rate"""
         mix_rate = -1.0
-        if is_cry and random.random() < self.config.mixup_config.cry_mix_prob:
+        if is_cry and random.random() < self.config.mixup.cry_mix_prob:
             while mix_rate <= 0.0 or mix_rate >= 1.0:
-                mix_rate = random.gauss(self.config.mixup_config.cry_mix_rate_mean,
-                                        self.config.mixup_config.cry_mix_rate_std)
-        elif not is_cry and random.random() < self.config.mixup_config.other_mix_prob:
+                mix_rate = random.gauss(self.config.mixup.cry_mix_rate_mean,
+                                        self.config.mixup.cry_mix_rate_std)
+        elif not is_cry and random.random() < self.config.mixup.other_mix_prob:
             mix_rate = random.random()
         else:
             return mix_rate

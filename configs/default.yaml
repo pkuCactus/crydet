@@ -3,16 +3,16 @@
 
 # Feature extraction settings
 feature:
-  feature_type: mfcc          # 'mfcc' or 'fbank'
-  n_mfcc: 40                  # Number of MFCC coefficients
-  n_mels: 64                  # Number of mel filters
-  n_fft: 1024                 # FFT window size
-  hop_length: 512             # Hop length between frames
-  fmin: 250                   # Minimum frequency for mel filterbank
-  fmax: 8000                  # Maximum frequency for mel filterbank
-  normalize: true             # Normalize features
-  use_delta: true             # Add time delta features
-  use_freq_delta: true        # Add frequency delta features
+  feature_type: fbank          # 'mfcc' or 'fbank'
+  n_mfcc: 40                   # Number of MFCC coefficients (used when feature_type='mfcc')
+  n_mels: 64                   # Number of mel filters (used when feature_type='fbank')
+  n_fft: 1024                  # FFT window size
+  hop_length: 512              # Hop length between frames
+  fmin: 250                    # Minimum frequency for mel filterbank
+  fmax: 8000                   # Maximum frequency for mel filterbank
+  normalize: true              # Normalize features
+  use_delta: true              # Add time delta features
+  use_freq_delta: true         # Add frequency delta features
 
 # Dataset settings
 dataset:
@@ -20,47 +20,58 @@ dataset:
     - .wav
     - .mp3
     - .flac
-  sample_rate: 16000          # Target sample rate for audio
-  slice_len: 5.0              # Duration of each audio segment (seconds)
-  stride: 3.0                 # Stride between segments (seconds)
-  cry_rate: 0.5               # Ratio of cry samples in batch
-  cache_dir: ./audio_cache    # Directory for caching resampled audio
-  use_cache: true             # Enable caching
-  force_mono: true            # Convert stereo to mono
+  sample_rate: 16000           # Target sample rate for audio
+  slice_len: 5.0               # Duration of each audio segment (seconds)
+  stride: 3.0                  # Stride between segments (seconds)
+  cry_rate: 0.5                # Ratio of cry samples in batch
+  cache_dir: ./audio_cache     # Directory for caching resampled audio
+  force_mono: true             # Convert stereo to mono
 
 # Data augmentation settings
 augmentation:
-  mixup_alpha: null           # Mixup alpha parameter
-  mask_rate: null             # SpecAugment mask rate
-  noise_rate: null            # Noise addition rate
-  pitch_shift: null           # Pitch shift range (semitones)
-  reverb_rate: null           # Reverb rate
-  gain_db: null               # Random gain range (dB)
+  mixup:
+    cry_mix_prob: 0.3          # Probability of applying mixup to cry samples
+    cry_mix_rate_mean: 0.3     # Mean mixup rate for cry samples (gaussian sampling)
+    cry_mix_rate_std: 0.15     # Std of mixup rate for cry samples
+    other_mix_prob: 0.3        # Probability of applying mixup to non-cry samples
+    mix_front_prob: 0.7        # Probability of applying mixup before other augmentations
+
+  cry_aug_prob: 0.9            # Probability of applying augmentation to cry samples
+  other_aug_prob: 0.6          # Probability of applying augmentation to non-cry samples
+  other_reverse_prob: 0.5      # Probability of reversing non-cry samples
+
+  # Individual effect probabilities
+  pitch_prob: 0.5              # Probability of pitch shift
+  reverb_prob: 0.8             # Probability of reverb
+  phaser_prob: 0.5             # Probability of phaser effect
+  echo_prob: 0.5               # Probability of echo (only for non-cry)
+  noise_prob: 0.1              # Probability of adding noise
+  gain_prob: 0.9               # Probability of gain adjustment
 
 # Model settings
 model:
-  model_type: transformer     # Model type
-  num_classes: 2              # Number of output classes
-  d_model: 256                # Transformer hidden dimension
-  n_heads: 4                  # Number of attention heads
-  n_layers: 8                 # Number of transformer layers
-  d_ff: 512                   # Feed-forward dimension
-  dropout: 0.1                # Dropout rate
+  model_type: transformer      # Model type
+  num_classes: 2               # Number of output classes
+  d_model: 256                 # Transformer hidden dimension
+  n_heads: 4                   # Number of attention heads
+  n_layers: 8                  # Number of transformer layers
+  d_ff: 512                    # Feed-forward dimension
+  dropout: 0.1                 # Dropout rate
 
 # Training settings
 training:
-  batch_size: 32              # Batch size
-  num_workers: 4              # Number of data loading workers
-  pin_memory: true            # Pin memory for faster GPU transfer
-  num_epochs: 100             # Number of training epochs
-  learning_rate: 0.001        # Learning rate
-  weight_decay: 0.00001       # Weight decay
-  grad_clip: null             # Gradient clipping value (null = no clipping)
-  early_stopping_patience: 10 # Early stopping patience
+  batch_size: 32               # Batch size
+  num_workers: 4               # Number of data loading workers
+  pin_memory: true             # Pin memory for faster GPU transfer
+  num_epochs: 100              # Number of training epochs
+  learning_rate: 0.001         # Learning rate
+  weight_decay: 0.00001        # Weight decay
+  grad_clip: null              # Gradient clipping value (null = no clipping)
+  early_stopping_patience: 10  # Early stopping patience
   checkpoint_dir: ./checkpoints  # Directory for saving checkpoints
-  log_dir: ./logs             # Directory for logs
-  use_augmentation: true      # Use data augmentation
-  device: cuda                # Device to use (cuda/cpu)
-  log_interval: 10            # Log every N batches
-  val_interval: 1             # Validate every N epochs
-  save_best_only: true        # Only save best model
+  log_dir: ./logs              # Directory for logs
+  use_augmentation: true       # Use data augmentation
+  device: cuda                 # Device to use (cuda/cpu)
+  log_interval: 10             # Log every N batches
+  val_interval: 1              # Validate every N epochs
+  save_best_only: true         # Only save best model

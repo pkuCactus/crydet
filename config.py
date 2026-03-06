@@ -3,31 +3,80 @@ Configuration classes for Baby Cry Detection
 Defines configuration dataclasses for feature extraction, model, and training
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Any
+from dataclasses import dataclass, field, asdict, fields, MISSING
+from typing import Optional, Dict, Any, Type, TypeVar, get_origin, get_args
 from pathlib import Path
 import yaml
 
 
+T = TypeVar('T')
+
+
+def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
+    """
+    Generic function to convert dict to dataclass instance.
+    Handles nested dataclasses and Optional types automatically.
+
+    Args:
+        cls: Target dataclass type
+        data: Dictionary with configuration values
+
+    Returns:
+        Instance of cls with values from data
+    """
+    if data is None:
+        data = {}
+
+    if not hasattr(cls, '__dataclass_fields__'):
+        return data
+
+    result = {}
+    for f in fields(cls):
+        if f.name.startswith('_'):
+            continue
+
+        field_type = f.type
+        value = data.get(f.name, MISSING)
+
+        # Handle Optional types
+        origin = get_origin(field_type)
+        if origin is Optional:
+            field_type = get_args(field_type)[0]
+
+        # Handle nested dataclass
+        if hasattr(field_type, '__dataclass_fields__'):
+            nested_data = data.get(f.name, {})
+            result[f.name] = from_dict(field_type, nested_data)
+        elif value is not MISSING:
+            result[f.name] = value
+        elif f.default is not MISSING:
+            result[f.name] = f.default
+        elif f.default_factory is not MISSING:
+            result[f.name] = f.default_factory()
+
+    return cls(**result)
+
+
 @dataclass
 class MixupConfig:
+    """Mixup augmentation configuration"""
     cry_mix_prob: float = 0.3
-    # 高斯采样mix_rate
     cry_mix_rate_mean: float = 0.3
     cry_mix_rate_std: float = 0.15
-    other_mix_prob: float = 0.3 # [0, 1)均匀采样mix_rate
+    other_mix_prob: float = 0.3
     mix_front_prob: float = 0.7
 
 
 @dataclass
 class AugmentationConfig:
     """Data augmentation configuration"""
-    # Mix up config
-    mixup_config: MixupConfig = field(default_factory=MixupConfig)
-    # Other augmentation Config
+    mixup: MixupConfig = field(default_factory=MixupConfig)
+
+    # Augmentation probabilities by label type
     cry_aug_prob: float = 0.9
     other_aug_prob: float = 0.6
     other_reverse_prob: float = 0.5
+
     # Individual effect probabilities
     pitch_prob: float = 0.5
     reverb_prob: float = 0.8
@@ -36,29 +85,21 @@ class AugmentationConfig:
     noise_prob: float = 0.1
     gain_prob: float = 0.9
 
-    # 字符串到属性名的映射（用于索引访问）
-    _key_map: Dict[str, str] = field(default_factory=lambda: {
-        'pitch': 'pitch_prob',
-        'reverb': 'reverb_prob',
-        'phaser': 'phaser_prob',
-        'echo': 'echo_prob',
-        'gain': 'gain_prob',
-    }, repr=False, compare=False)
+    _key_map: Dict[str, str] = field(
+        default_factory=lambda: {
+            'pitch': 'pitch_prob',
+            'reverb': 'reverb_prob',
+            'phaser': 'phaser_prob',
+            'echo': 'echo_prob',
+            'gain': 'gain_prob',
+        },
+        repr=False,
+        compare=False
+    )
 
-    def __getitem__(self, key):
-        """
-        支持索引访问
-
-        Args:
-            key: 字符串键名，支持简写（如 'pitch'）或完整名（如 'pitch_prob'）
-
-        Usage:
-            config['pitch']      # 等同于 config.pitch_prob
-            config['pitch_prob'] # 等同于 config.pitch_prob
-        """
-        # 先检查简写映射
-        if key in self._key_map:
-            key = self._key_map[key]
+    def __getitem__(self, key: str) -> float:
+        """Support indexing access for effect probabilities."""
+        key = self._key_map.get(key, key)
         if hasattr(self, key):
             return getattr(self, key)
         raise KeyError(f"Unknown key: {key}")
@@ -67,7 +108,7 @@ class AugmentationConfig:
 @dataclass
 class FeatureConfig:
     """Feature extraction configuration"""
-    feature_type: str = 'fbank'  # 'mfcc' or 'fbank'
+    feature_type: str = 'fbank'
     n_mfcc: Optional[int] = 40
     n_mels: Optional[int] = 64
     n_fft: int = 1024
@@ -80,12 +121,12 @@ class FeatureConfig:
 
     @property
     def feature_dim(self) -> int:
-        """Return feature dimension"""
+        """Return feature dimension based on feature type"""
         return self.n_mfcc if self.feature_type == 'mfcc' else self.n_mels
 
     @property
     def num_channels(self) -> int:
-        """Return number of output channels"""
+        """Return number of output channels (including delta features)"""
         channels = 1
         if self.use_delta:
             channels += 1
@@ -104,8 +145,6 @@ class DatasetConfig:
     cry_rate: float = 0.5
     cache_dir: Optional[str] = './audio_cache'
     force_mono: bool = True
-    aug_config: AugmentationConfig = field(default_factory=AugmentationConfig)
-    feature_config: FeatureConfig = field(default_factory=FeatureConfig)
 
 
 @dataclass
@@ -149,13 +188,14 @@ class Config:
     """Main configuration container"""
     feature: FeatureConfig = field(default_factory=FeatureConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
 
 
 def load_config(config_path: str) -> Config:
     """
-    Load configuration from YAML file
+    Load configuration from YAML file.
 
     Args:
         config_path: Path to YAML configuration file
@@ -168,101 +208,14 @@ def load_config(config_path: str) -> Config:
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     with open(config_path, 'r', encoding='utf-8') as f:
-        yaml_config = yaml.safe_load(f)
+        yaml_config = yaml.safe_load(f) or {}
 
-    return _dict_to_config(yaml_config)
-
-
-def _dict_to_config(yaml_dict: Dict[str, Any]) -> Config:
-    """Convert dictionary to Config object"""
-    # Parse feature config
-    feature_dict = yaml_dict.get('feature', {})
-    feature_config = FeatureConfig(
-        feature_type=feature_dict.get('feature_type', 'mfcc'),
-        n_mfcc=feature_dict.get('n_mfcc', 40),
-        n_mels=feature_dict.get('n_mels', 64),
-        n_fft=feature_dict.get('n_fft', 1024),
-        hop_length=feature_dict.get('hop_length', 512),
-        fmin=feature_dict.get('fmin', 250),
-        fmax=feature_dict.get('fmax', 8000),
-        normalize=feature_dict.get('normalize', True),
-        use_delta=feature_dict.get('use_delta', True),
-        use_freq_delta=feature_dict.get('use_freq_delta', True),
-    )
-
-    # Parse augmentation config
-    aug_dict = yaml_dict.get('augmentation', {})
-    aug_config = AugmentationConfig(
-        cry_aug_rate=aug_dict.get('cry_aug_rate', 0.5),
-        cry_mix_rate=aug_dict.get('cry_mix_rate', 0.3),
-        cry_mix_mean=aug_dict.get('cry_mix_mean', 0.5),
-        cry_mix_std=aug_dict.get('cry_mix_std', 0.15),
-        non_cry_aug_rate=aug_dict.get('non_cry_aug_rate', 0.5),
-        pitch_shift=aug_dict.get('pitch_shift', 2.0),
-        pitch_prob=aug_dict.get('pitch_prob', 0.5),
-        reverb_prob=aug_dict.get('reverb_prob', 0.5),
-        phaser_prob=aug_dict.get('phaser_prob', 0.5),
-        echo_prob=aug_dict.get('echo_prob', 0.5),
-    )
-
-    # Parse dataset config
-    data_dict = yaml_dict.get('dataset', {})
-    dataset_config = DatasetConfig(
-        audio_suffixes=tuple(data_dict.get('audio_suffixes', ('.wav', '.mp3', '.flac'))),
-        sample_rate=data_dict.get('sample_rate', 16000),
-        slice_len=data_dict.get('slice_len', 5.0),
-        stride=data_dict.get('stride', 3.0),
-        cry_rate=data_dict.get('cry_rate', 0.5),
-        cache_dir=data_dict.get('cache_dir', './audio_cache'),
-        use_cache=data_dict.get('use_cache', True),
-        force_mono=data_dict.get('force_mono', True),
-        aug_config=aug_config,
-        feature_config=feature_config,
-    )
-
-    # Parse model config
-    model_dict = yaml_dict.get('model', {})
-    model_config = ModelConfig(
-        model_type=model_dict.get('model_type', 'transformer'),
-        num_classes=model_dict.get('num_classes', 2),
-        d_model=model_dict.get('d_model', 256),
-        n_heads=model_dict.get('n_heads', 4),
-        n_layers=model_dict.get('n_layers', 8),
-        d_ff=model_dict.get('d_ff', 512),
-        dropout=model_dict.get('dropout', 0.1),
-    )
-
-    # Parse training config
-    train_dict = yaml_dict.get('training', {})
-    training_config = TrainingConfig(
-        batch_size=train_dict.get('batch_size', 32),
-        num_workers=train_dict.get('num_workers', 4),
-        pin_memory=train_dict.get('pin_memory', True),
-        num_epochs=train_dict.get('num_epochs', 100),
-        learning_rate=train_dict.get('learning_rate', 1e-3),
-        weight_decay=train_dict.get('weight_decay', 1e-5),
-        grad_clip=train_dict.get('grad_clip'),
-        early_stopping_patience=train_dict.get('early_stopping_patience', 10),
-        checkpoint_dir=train_dict.get('checkpoint_dir', './checkpoints'),
-        log_dir=train_dict.get('log_dir', './logs'),
-        use_augmentation=train_dict.get('use_augmentation', True),
-        device=train_dict.get('device', 'cuda'),
-        log_interval=train_dict.get('log_interval', 10),
-        val_interval=train_dict.get('val_interval', 1),
-        save_best_only=train_dict.get('save_best_only', True),
-    )
-
-    return Config(
-        feature=feature_config,
-        dataset=dataset_config,
-        model=model_config,
-        training=training_config,
-    )
+    return from_dict(Config, yaml_config)
 
 
-def save_config(config: Config, save_path: str):
+def save_config(config: Config, save_path: str) -> None:
     """
-    Save configuration to YAML file
+    Save configuration to YAML file.
 
     Args:
         config: Config object to save
@@ -280,19 +233,17 @@ def save_config(config: Config, save_path: str):
             'stride': config.dataset.stride,
             'cry_rate': config.dataset.cry_rate,
             'cache_dir': config.dataset.cache_dir,
-            'use_cache': config.dataset.use_cache,
             'force_mono': config.dataset.force_mono,
         },
-        'augmentation': asdict(config.dataset.aug_config),
+        'augmentation': asdict(config.augmentation),
         'model': asdict(config.model),
         'training': asdict(config.training),
     }
 
     with open(save_path, 'w', encoding='utf-8') as f:
-        yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True)
+        yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
-# Convenience function to get default config
 def get_default_config() -> Config:
     """Get default configuration"""
     return Config()

@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 
 from .audio_reader import AudioReader
 from .augmentation import AudioAugmenter
-from config import DatasetConfig
+from config import DatasetConfig, AugmentationConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
 LOGGER = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class CryDataset(Dataset):
         self,
         data_dict: dict,
         config: DatasetConfig,
-        use_augmentation: bool = False
+        aug_config: Optional[AugmentationConfig] = None,
     ):
         self.audio_reader = AudioReader(
             target_sr=config.sample_rate,
@@ -39,16 +39,15 @@ class CryDataset(Dataset):
         )
         self.config = config
         self.data_dict = data_dict
-        self.use_augmentation = use_augmentation
 
         # 构建文件调度字典
         self._get_schedule_dict()
 
-        # Initialize augmenter if enabled
+        # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
-        if config.aug_config is not None:
+        if aug_config is not None:
             self.augmenter = AudioAugmenter(
-                config=config.aug_config,
+                config=aug_config,
                 sample_rate=config.sample_rate,
                 audio_reader=self.audio_reader,
             )
@@ -159,7 +158,7 @@ class CryDataset(Dataset):
         cache_file = os.path.join(self.config.cache_dir, f"{data_dir}_{cache_hash}.json")
 
         # Try to load from cache
-        if self.config.use_cache and os.path.exists(cache_file):
+        if cache_file and os.path.exists(cache_file):
             try:
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     cached_data = json.load(f)
@@ -182,7 +181,7 @@ class CryDataset(Dataset):
                 file_infos.append((file_abs_path, duration))
 
         # Save to cache
-        if self.config.use_cache and self.config.cache_dir:
+        if self.config.cache_dir:
             os.makedirs(self.config.cache_dir, exist_ok=True)
             try:
                 with open(cache_file, 'w', encoding='utf-8') as f:
