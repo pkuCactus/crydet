@@ -80,6 +80,17 @@ def collate_fn(batch):
     return features, label_indices
 
 
+def worker_init_fn(worker_id: int):
+    """Initialize worker with unique seed for reproducibility."""
+    # Get base seed from torch
+    base_seed = torch.initial_seed()
+    # Create unique seed for this worker
+    worker_seed = base_seed + worker_id
+    np.random.seed(worker_seed % (2**32))
+    import random
+    random.seed(worker_seed % (2**32))
+
+
 class Trainer:
     """Trainer class for CryTransformer with DDP support"""
 
@@ -288,27 +299,47 @@ class Trainer:
         epoch_loss = total_loss / len(self.train_loader)
         epoch_acc = correct / total
 
-        if self.rank == 0:
+        # Gather predictions for F1 calculation from all ranks
+        if self.is_distributed:
+            all_preds = self._gather_lists(all_preds)
+            all_targets = self._gather_lists(all_targets)
+
+        # Synchronize at end of epoch
+        if self.is_distributed:
+            dist.barrier()
+
+        # All ranks can now compute metrics since they have gathered data
+        if len(all_targets) > 0 and len(all_preds) > 0:
             from sklearn.metrics import f1_score, precision_score, recall_score
-            f1 = f1_score(all_targets, all_preds, average='macro')
-            precision = precision_score(all_targets, all_preds, average='macro')
-            recall = recall_score(all_targets, all_preds, average='macro')
+            try:
+                f1 = f1_score(all_targets, all_preds, average='macro')
+                precision = precision_score(all_targets, all_preds, average='macro')
+                recall = recall_score(all_targets, all_preds, average='macro')
+            except Exception as e:
+                self.logger.warning(f"Failed to compute train metrics: {e}")
+                f1 = precision = recall = 0.0
         else:
             f1 = precision = recall = 0.0
 
         return {'loss': epoch_loss, 'accuracy': epoch_acc, 'f1': f1, 'precision': precision, 'recall': recall}
 
     def _gather_lists(self, local_list: list) -> list:
-        """Gather lists from all ranks to rank 0 using object gather."""
+        """Gather lists from all ranks to all ranks using all_gather_object."""
         if not self.is_distributed:
             return local_list
-        # Gather to rank 0
-        gathered = [None] * self.world_size if self.rank == 0 else None
-        dist.gather_object(local_list, gathered, dst=0)
-        if self.rank == 0:
+
+        # Use all_gather_object which is more robust than gather_object
+        # All ranks must participate
+        gathered_lists = [None] * self.world_size
+        try:
+            dist.all_gather_object(gathered_lists, local_list)
             # Flatten list of lists
-            return [item for sublist in gathered for item in sublist]
-        return []
+            result = [item for sublist in gathered_lists for item in sublist]
+            return result
+        except Exception as e:
+            self.logger.warning(f"Failed to gather lists: {e}")
+            # Fallback: return local list
+            return local_list
 
     @torch.no_grad()
     def _validate(self) -> Dict[str, float]:
@@ -354,6 +385,7 @@ class Trainer:
             total_loss, correct, total = metrics_tensor.tolist()
 
             # Gather predictions for F1/Precision/Recall/AUC calculation
+            # All ranks must participate in all_gather_object
             all_preds = self._gather_lists(all_preds)
             all_targets = self._gather_lists(all_targets)
             all_probs = self._gather_lists(all_probs)
@@ -361,14 +393,20 @@ class Trainer:
         val_loss = total_loss / len(self.val_loader) if len(self.val_loader) > 0 else 0
         val_acc = correct / total if total > 0 else 0
 
-        if self.rank == 0:
+        # All ranks now have the gathered data, so all can compute metrics
+        # But we only need metrics on rank 0 for logging
+        if len(all_targets) > 0 and len(all_preds) > 0:
             from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
-            f1 = f1_score(all_targets, all_preds, average='macro')
-            precision = precision_score(all_targets, all_preds, average='macro')
-            recall = recall_score(all_targets, all_preds, average='macro')
+            try:
+                f1 = f1_score(all_targets, all_preds, average='macro')
+                precision = precision_score(all_targets, all_preds, average='macro')
+                recall = recall_score(all_targets, all_preds, average='macro')
+            except Exception as e:
+                self.logger.warning(f"Failed to compute F1/Precision/Recall: {e}")
+                f1 = precision = recall = 0.0
             try:
                 auc = roc_auc_score(all_targets, all_probs)
-            except:
+            except Exception:
                 auc = 0.5
         else:
             f1 = precision = recall = auc = 0.0
@@ -454,6 +492,7 @@ class Trainer:
 
                     # Early stopping check
                     val_f1 = val_metrics['f1']
+                    should_stop = torch.tensor(0, device=self.device)
                     if val_f1 > self.best_val_f1:
                         self.best_val_f1 = val_f1
                         self.patience_counter = 0
@@ -464,11 +503,20 @@ class Trainer:
                         if self.train_cfg.early_stopping_patience and \
                            self.patience_counter >= self.train_cfg.early_stopping_patience:
                             self.logger.info(f"Early stopping triggered at epoch {epoch}")
-                            break
+                            should_stop = torch.tensor(1, device=self.device)
 
-                    # Regular checkpoint
+                    # Regular checkpoint (non-best)
                     if not self.train_cfg.save_best_only:
                         self._save_checkpoint(f'checkpoint_epoch_{epoch}.pt')
+
+            # Synchronize early stopping decision across all ranks
+            if self.is_distributed and self.val_loader is not None:
+                # Create should_stop tensor on non-rank-0 if not exists
+                if self.rank != 0:
+                    should_stop = torch.tensor(0, device=self.device)
+                dist.broadcast(should_stop, src=0)
+                if should_stop.item() == 1:
+                    break
 
             # Update SWA
             if self.train_cfg.use_swa and self.swa_model is not None and epoch >= self.train_cfg.swa_start:
@@ -505,9 +553,16 @@ def setup_distributed() -> Tuple[int, int, torch.device]:
         local_rank = 0
 
     if world_size > 1:
+        # Set NCCL environment variables for better stability
+        os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
+        os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+
         dist.init_process_group(backend='nccl', init_method='env://')
         torch.cuda.set_device(local_rank)
         device = torch.device(f'cuda:{local_rank}')
+
+        # Synchronize all processes after initialization
+        dist.barrier()
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -613,6 +668,10 @@ def main():
                 feat_config=config.feature
             )
 
+        # Synchronize after dataset creation
+        if world_size > 1:
+            dist.barrier()
+
         # Create samplers and loaders
         if world_size > 1:
             # Use DistributedCrySampler for distributed training
@@ -630,8 +689,11 @@ def main():
             batch_size=config.training.batch_size,
             sampler=train_sampler,
             num_workers=config.training.num_workers,
-            pin_memory=config.training.pin_memory,
-            collate_fn=collate_fn
+            pin_memory=config.training.pin_memory and device.type == 'cuda',
+            collate_fn=collate_fn,
+            worker_init_fn=worker_init_fn,
+            persistent_workers=config.training.num_workers > 0,
+            multiprocessing_context='spawn' if config.training.num_workers > 0 else None
         )
 
         if val_dataset:
@@ -642,8 +704,11 @@ def main():
                 batch_size=config.training.batch_size,
                 sampler=val_sampler,
                 num_workers=config.training.num_workers,
-                pin_memory=config.training.pin_memory,
-                collate_fn=collate_fn
+                pin_memory=config.training.pin_memory and device.type == 'cuda',
+                collate_fn=collate_fn,
+                worker_init_fn=worker_init_fn,
+                persistent_workers=config.training.num_workers > 0,
+                multiprocessing_context='spawn' if config.training.num_workers > 0 else None
             )
 
         # Create model
@@ -661,6 +726,10 @@ def main():
 
         if rank == 0:
             print_model_summary(model)
+
+        # Synchronize after model creation
+        if world_size > 1:
+            dist.barrier()
 
         # Resume from checkpoint if specified
         start_epoch = 0
