@@ -36,11 +36,46 @@
 - **帧数计算**:
   - 帧移 (hop_length) = 512 样本 = 32ms
   - 帧数 = ceil(80000 / 512) = **157 帧**
-- **输出形状**: `[batch, time_frames, n_mels]` = `[B, 157, 64]`
+- **基础输出形状**: `[batch, time_frames, n_mels]` = `[B, 157, 64]`
   - 时间维度 (157帧) 作为 Transformer 的序列长度
   - Mel维度 (64) 作为每个 token 的特征维度
 
-### 2.3 归一化策略
+### 2.3 特征维度扩展（可选）
+
+可通过配置添加差分特征，提升模型对动态变化的感知能力：
+
+| 配置 | 特征组成 | 维度 | 说明 |
+|------|----------|------|------|
+| 基础 | FBank | 64 | 静态频谱特征 |
+| +时差 | FBank + ΔTime | 128 | 添加时间差分（一阶差分） |
+| +频差 | FBank + ΔTime + ΔFreq | 192 | 额外添加频率差分 |
+
+**时差特征 (Delta)**: 计算相邻帧之间的一阶差分，反映频谱随时间的变化趋势
+```python
+# 时差计算示例
+delta_t[t, i] = fbank[t+1, i] - fbank[t-1, i]  # 中心差分
+```
+
+**频差特征 (Freq Delta)**: 计算相邻频带之间的差分，反映频谱包络的形状变化
+```python
+# 频差计算示例
+delta_f[t, i] = fbank[t, i+1] - fbank[t, i-1]  # 中心差分
+```
+
+**配置启用**:
+```yaml
+feature:
+  n_mels: 64
+  use_delta: true        # 启用时差特征 (+64维)
+  use_freq_delta: true   # 启用频差特征 (+64维)
+```
+
+**输出形状变化**:
+- 基础: `[B, 157, 64]`
+- +时差: `[B, 157, 128]`
+- +频差: `[B, 157, 192]`
+
+### 2.4 归一化策略
 - **频带归一化**: 每帧独立归一化到 [0, 1]
 - **指数平滑**: 对最大值进行时间维度平滑 (decay=0.9)
 
@@ -51,14 +86,21 @@
 ### 3.1 架构概览
 
 ```
-Input: [B, T, 64] (FBank features: batch, time_frames, n_mels)
+Input: [B, T, F] (FBank features: batch, time_frames, feature_dim)
     ↓
 ┌─────────────────────────────────────┐
+│  Feature Dimension Configurable       │
+│  - Base: F = 64 (FBank)               │
+│  - +Delta: F = 128 (FBank + ΔTime)    │
+│  - +FreqDelta: F = 192 (+ ΔFreq)      │
+└─────────────────────────────────────┘
+    ↓ [B, T, F]  (T=157, F=64/128/192)
+┌─────────────────────────────────────┐
 │  Linear Projection                    │
-│  - Linear: 64 → d_model               │
+│  - Linear: F → d_model                │
 │  - 将每个时间帧的特征投影到d_model维度  │
 └─────────────────────────────────────┘
-    ↓ [B, T, d_model]  (T=157, d_model=256/512等)
+    ↓ [B, T, d_model]  (d_model=256/512等)
 ┌─────────────────────────────────────┐
 │  Positional Encoding                  │
 │  - 正弦/余弦位置编码 或 可学习位置编码  │
@@ -122,11 +164,11 @@ d_model * n_layers < 3000  →  depthwise attention + inverted bottleneck
 ### 3.4 关键设计决策
 
 #### 3.4.1 线性投影层
-直接将每帧的FBank特征投影到d_model维度，替代卷积Patch嵌入：
+直接将每帧的FBank特征（可包含差分特征）投影到d_model维度，替代卷积Patch嵌入：
 ```python
-# 输入: [B, T, 64]  (T=157帧, 64=n_mels)
-# 线性投影: 64 → d_model
-Linear(in_features=64, out_features=d_model)
+# 输入: [B, T, F]  (T=157帧, F=64/128/192)
+# 线性投影: F → d_model
+Linear(in_features=F, out_features=d_model)
 # 输出: [B, T, d_model]  (保留时间维度T)
 ```
 
