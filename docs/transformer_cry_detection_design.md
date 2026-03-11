@@ -13,6 +13,7 @@
 2. **实时性能**: 边缘端推理延迟 < 100ms
 3. **高准确率**: F1-score > 0.95
 4. **小模型尺寸**: 微型版模型 < 1MB
+5. **灵活配置**: 通过层参数控制模型大小，而非固定variant
 
 ---
 
@@ -70,46 +71,42 @@ Input: [B, 64, 157] (FBank features)
 Output: [B, 2] (cry / non-cry logits)
 ```
 
-### 3.2 多层级配置
+### 3.2 模型大小配置
 
-为满足不同算力芯片需求，设计三个模型层级：
+模型大小通过**层参数**灵活控制，而非固定variant：
 
-#### 3.2.1 高性能版 (Transformer-Large)
-| 参数 | 值 | 适用场景 |
-|------|-----|---------|
-| d_model | 512 | 服务器/云端 |
-| n_heads | 8 | 高准确率需求 |
-| n_layers | 12 | |
-| d_ff | 2048 | |
-| 参数量 | ~15M | |
-| 计算量 | ~2.5G MACs | |
-| 预期F1 | 0.97+ | |
+| 参数 | 说明 | 推荐范围 |
+|------|------|---------|
+| `d_model` | 隐藏层维度 | 64-512 |
+| `n_layers` | Transformer层数 | 2-12 |
+| `n_heads` | 注意力头数 | 2-8 |
+| `d_ff` | FFN维度 | 128-2048 |
 
-#### 3.2.2 轻量版 (Transformer-Medium)
-| 参数 | 值 | 适用场景 |
-|------|-----|---------|
-| d_model | 256 | 中高端ARM芯片 |
-| n_heads | 4 | 树莓派4/Edge TPU |
-| n_layers | 6 | |
-| d_ff | 1024 | |
-| 参数量 | ~4M | |
-| 计算量 | ~600M MACs | |
-| 预期F1 | 0.95+ | |
+#### 3.2.1 预设配置参考
 
-#### 3.2.3 微型版 (Transformer-Tiny)
-| 参数 | 值 | 适用场景 |
-|------|-----|---------|
-| d_model | 128 | 低功耗MCU |
-| n_heads | 2 | Cortex-M系列 |
-| n_layers | 3 | 语音唤醒芯片 |
-| d_ff | 256 | |
-| 参数量 | ~400K | |
-| 计算量 | ~50M MACs | |
-| 预期F1 | 0.92+ | |
+| 配置 | d_model | n_layers | n_heads | 参数量 | 适用场景 |
+|------|---------|----------|---------|--------|---------|
+| Large | 512 | 12 | 8 | ~40M | 服务器/云端 |
+| Medium | 256 | 6 | 4 | ~5M | 边缘设备(RPi/EdgeTPU) |
+| Small | 192 | 4 | 4 | ~2M | 嵌入式设备 |
+| Tiny | 128 | 3 | 2 | ~600K | MCU(Cortex-M/ESP32) |
+| Nano | 64 | 2 | 2 | ~120K | 超低功耗MCU |
 
-### 3.3 关键设计决策
+### 3.3 自动架构优化
 
-#### 3.3.1 Patch Embedding
+当 `attention_type='auto'` 和 `ffn_type='auto'` 时，系统根据模型大小自动选择最优实现：
+
+```python
+# 自动选择逻辑
+d_model * n_layers >= 3000  →  standard attention + standard FFN
+                         (大模型，追求精度)
+d_model * n_layers < 3000  →  depthwise attention + inverted bottleneck
+                         (小模型，追求效率)
+```
+
+### 3.4 关键设计决策
+
+#### 3.4.1 Patch Embedding
 替代传统的帧级输入，使用卷积进行Patch嵌入：
 ```python
 # 将时间维度进行Patch分割
@@ -117,37 +114,36 @@ Conv1d(in_channels=64, out_channels=d_model, kernel_size=3, stride=2, padding=1)
 # 输出: [B, d_model, 79] (157//2 ≈ 79 patches)
 ```
 
-#### 3.3.2 相对位置编码
+#### 3.4.2 相对位置编码
 使用可学习的相对位置编码替代绝对位置编码：
 - 更好地处理变长输入
 - 更少的参数量
 - 更适合音频这种时序数据
 
-#### 3.3.3 注意力优化
+#### 3.4.3 注意力机制变体
 
-**高性能版**: 标准Multi-Head Self-Attention
+**标准Multi-Head Self-Attention** (大模型)
 ```
 Attention(Q,K,V) = softmax(QK^T/√d_k)V
 ```
 
-**轻量版**: 使用Linear Attention近似
+**Linear Attention** (中等模型，可选)
 ```
 Attention(Q,K,V) ≈ φ(Q)(φ(K)^TV) / (φ(Q)φ(K)^T·1)
 # 将O(n²)复杂度降为O(n)
 ```
 
-**微型版**: 使用Depthwise-Separable Attention
+**Depthwise-Separable Attention** (小模型)
 ```
-# 分解时间和特征维度的注意力
-TimeAttention + FeatureAttention
-大幅减少参数量和计算量
+# 使用深度可分离卷积减少参数量
+DepthwiseConv1d + PointwiseConv
 ```
 
-#### 3.3.4 FFN优化
+#### 3.4.4 FFN优化
 
-**高性能版**: 标准FFN (d_model → 4×d_model → d_model)
+**标准FFN**: d_model → 4×d_model → d_model
 
-**轻量/微型版**: 使用MobileNetV2风格的Inverted Bottleneck
+**Inverted Bottleneck FFN** (小模型)
 ```python
 # 1x1 expand -> depthwise 1D conv -> 1x1 project
 # 减少计算量同时保持表达能力
@@ -157,13 +153,34 @@ TimeAttention + FeatureAttention
 
 ## 4. 训练策略
 
-### 4.1 损失函数
+### 4.1 分布式训练 (DDP)
+
+支持多GPU分布式训练，自动处理梯度同步：
+
+```bash
+# 单卡训练
+python train.py --config configs/model_medium.yaml --train_list train.json
+
+# 多卡训练 (4 GPU)
+torchrun --nproc_per_node=4 train.py --config configs/model_medium.yaml --train_list train.json
+
+# 或使用启动脚本
+./train_ddp.sh --ngpu 4 --config configs/model_medium.yaml --train_list train.json
+```
+
+**DDP特性**:
+- 自动检测GPU数量
+- 分布式Sampler保持cry/non-cry比例
+- 梯度自动all-reduce
+- 仅rank 0保存checkpoint
+
+### 4.2 损失函数
 ```python
 # 标签平滑交叉熵 + Focal Loss (处理类别不平衡)
 loss = α * CE(p, y_smooth) + β * FocalLoss(p, y)
 ```
 
-### 4.2 优化器配置
+### 4.3 优化器配置
 ```python
 optimizer = AdamW(
     lr=1e-3,
@@ -175,16 +192,17 @@ scheduler = CosineAnnealingWarmRestarts(
 )
 ```
 
-### 4.3 数据增强
+### 4.4 数据增强
 - **Mixup**: 标签感知的音频混合 (cry样本与非cry样本不同策略)
 - **SpecAugment**: 时域和频域掩码
 - **音频效果**: pitch shift, reverb, noise injection
 
-### 4.4 训练技巧
+### 4.5 训练技巧
 1. **Warmup**: 前5个epoch线性增加学习率
 2. **梯度裁剪**: max_norm=1.0
 3. **早停**: patience=10
 4. **模型平均**: SWA (Stochastic Weight Averaging)
+5. **混合精度**: AMP自动混合精度训练
 
 ---
 
@@ -201,16 +219,20 @@ scheduler = CosineAnnealingWarmRestarts(
 | TensorFlow Lite (.tflite) | - | ✓ | ✓ |
 | C模型 (纯C代码) | - | - | ✓ |
 
+**导出命令**:
+```bash
+python export.py --checkpoint checkpoints/best_model.pt --format onnx --quantize int8
+```
+
 ### 5.2 芯片部署矩阵
 
-| 芯片平台 | 推荐模型 | 推理框架 | 预期延迟 |
+| 芯片平台 | 推荐配置 | 推理框架 | 预期延迟 |
 |---------|---------|---------|---------|
-| NVIDIA GPU | Large | PyTorch/TensorRT | <5ms |
-| Intel CPU | Large/Medium | ONNX Runtime | 10-50ms |
-| ARM Cortex-A72 | Medium | ONNX Runtime/NCNN | 20-50ms |
-| ARM Cortex-M4 | Tiny | CMSIS-NN | 50-100ms |
-| ESP32-S3 | Tiny | ESP-NN | 80-150ms |
-| 专用语音芯片 | Tiny | 厂商SDK | <50ms |
+| NVIDIA GPU | d_model=512, n_layers=12 | PyTorch/TensorRT | <5ms |
+| Intel CPU | d_model=256, n_layers=6 | ONNX Runtime | 10-50ms |
+| ARM Cortex-A72 | d_model=256, n_layers=6 | ONNX Runtime/NCNN | 20-50ms |
+| ARM Cortex-M4 | d_model=128, n_layers=3 | CMSIS-NN | 50-100ms |
+| ESP32-S3 | d_model=64, n_layers=2 | ESP-NN | 80-150ms |
 
 ### 5.3 推理优化
 
@@ -245,8 +267,8 @@ scheduler = CosineAnnealingWarmRestarts(
 | 指标 | 高性能版 | 轻量版 | 微型版 |
 |------|---------|--------|--------|
 | F1-Score | ≥0.97 | ≥0.95 | ≥0.92 |
-| 参数量 | ~15M | ~4M | ~400K |
-| 模型大小 (INT8) | ~15MB | ~4MB | ~400KB |
+| 参数量 | ~40M | ~5M | ~600K |
+| 模型大小 (INT8) | ~40MB | ~5MB | ~600KB |
 | 推理延迟* | 5ms | 20ms | 100ms |
 
 *注: 延迟为ARM Cortex-A72 @ 1.5GHz参考值
@@ -261,11 +283,13 @@ crydet/
 │   ├── __init__.py
 │   ├── transformer.py      # 核心Transformer实现
 │   ├── layers.py           # 自定义层 (注意力、FFN等)
-│   └── variants.py         # 多层级模型变体
-├── train.py                # 训练脚本
+│   └── variants.py         # 模型创建工厂
+├── train.py                # 训练脚本 (支持DDP)
+├── train_ddp.sh            # 多卡训练启动脚本
 ├── evaluate.py             # 评估脚本
 ├── export.py               # 模型导出工具
 ├── inference.py            # 推理脚本
+├── config.py               # 配置类 (ModelConfig等)
 └── configs/
     ├── model_large.yaml    # 高性能版配置
     ├── model_medium.yaml   # 轻量版配置
@@ -274,10 +298,87 @@ crydet/
 
 ---
 
-## 8. 实现计划
+## 8. 使用指南
 
-1. **Phase 1**: 基础Transformer实现 (支持Large/Medium/Tiny)
-2. **Phase 2**: 训练 pipeline 实现
-3. **Phase 3**: 评估与测试代码
-4. **Phase 4**: 模型导出与优化 (ONNX/量化)
-5. **Phase 5**: 边缘部署支持 (CMSIS-NN/TFLite)
+### 8.1 模型创建
+
+```python
+from config import ModelConfig
+from model import create_model
+
+# 方法1: 自定义层参数 (推荐)
+config = ModelConfig(d_model=256, n_layers=6, n_heads=4, d_ff=1024)
+model = create_model(config=config, in_channels=64, num_classes=2)
+
+# 方法2: 使用预设配置
+from model import MODEL_CONFIGS
+config = ModelConfig(**MODEL_CONFIGS['tiny'])
+model = create_model(config=config)
+```
+
+### 8.2 训练
+
+```bash
+# 单卡训练
+python train.py \
+    --config configs/model_medium.yaml \
+    --train_list audio_list/train.json \
+    --val_list audio_list/val.json \
+    --batch_size 32
+
+# 多卡训练
+./train_ddp.sh \
+    --ngpu 4 \
+    --config configs/model_medium.yaml \
+    --train_list audio_list/train.json \
+    --val_list audio_list/val.json \
+    --batch_size 32  # per GPU
+
+# 命令行覆盖层参数
+python train.py \
+    --config configs/default.yaml \
+    --d_model 192 \
+    --n_layers 4 \
+    --train_list audio_list/train.json
+```
+
+### 8.3 评估
+
+```bash
+python evaluate.py \
+    --checkpoint checkpoints/best_model.pt \
+    --test_list audio_list/test.json \
+    --benchmark
+```
+
+### 8.4 推理
+
+```bash
+python inference.py \
+    --checkpoint checkpoints/best_model.pt \
+    --audio path/to/audio.wav \
+    --detect_regions
+```
+
+### 8.5 导出
+
+```bash
+# 导出ONNX
+python export.py --checkpoint checkpoints/best_model.pt --format onnx
+
+# 导出量化模型
+python export.py --checkpoint checkpoints/best_model.pt --format onnx --quantize int8
+
+# 导出所有格式
+python export.py --checkpoint checkpoints/best_model.pt --format all
+```
+
+---
+
+## 9. 实现状态
+
+- [x] **Phase 1**: 基础Transformer实现 (支持灵活层参数配置)
+- [x] **Phase 2**: 训练 pipeline 实现 (支持DDP多卡训练)
+- [x] **Phase 3**: 评估与测试代码
+- [x] **Phase 4**: 模型导出与优化 (ONNX/量化)
+- [ ] **Phase 5**: 边缘部署支持 (CMSIS-NN/TFLite) - 待测试
