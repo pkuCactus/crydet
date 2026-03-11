@@ -226,14 +226,14 @@ class Trainer:
             disable=self.rank != 0
         )
 
-        for batch_idx, (features, targets) in enumerate(pbar):
+        for _, (features, targets) in enumerate(pbar):
             # Features are already in [B, T, F] format from dataset
             features = features.to(self.device)
             targets = targets.to(self.device)
 
             # Forward pass with mixed precision
             if self.scaler is not None:
-                with torch.amp.autocast():
+                with torch.amp.autocast(device_type='cuda'):
                     outputs = self.model(features)
                     loss = self.criterion(outputs, targets)
                     loss = loss / self.world_size  # Scale loss for gradient averaging
