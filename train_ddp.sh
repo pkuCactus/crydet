@@ -105,7 +105,7 @@ echo "GPUs:         $NGPU"
 echo "=============================================="
 
 # Build command
-CMD="python train.py --config $CONFIG --train_list $TRAIN_LIST"
+CMD="train.py --config $CONFIG --train_list $TRAIN_LIST"
 
 if [ -n "$VAL_LIST" ]; then
     CMD="$CMD --val_list $VAL_LIST"
@@ -147,7 +147,7 @@ if [ "$NGPU" -gt 1 ]; then
 else
     echo "Launching single GPU training..."
     echo ""
-    $CMD
+    python $CMD
 fi
 
 echo ""
