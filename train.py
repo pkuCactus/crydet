@@ -298,6 +298,18 @@ class Trainer:
 
         return {'loss': epoch_loss, 'accuracy': epoch_acc, 'f1': f1, 'precision': precision, 'recall': recall}
 
+    def _gather_lists(self, local_list: list) -> list:
+        """Gather lists from all ranks to rank 0 using object gather."""
+        if not self.is_distributed:
+            return local_list
+        # Gather to rank 0
+        gathered = [None] * self.world_size if self.rank == 0 else None
+        dist.gather_object(local_list, gathered, dst=0)
+        if self.rank == 0:
+            # Flatten list of lists
+            return [item for sublist in gathered for item in sublist]
+        return []
+
     @torch.no_grad()
     def _validate(self) -> Dict[str, float]:
         """Validate on validation set"""
@@ -318,7 +330,6 @@ class Trainer:
             desc="Validation",
             disable=self.rank != 0
         ):
-            # Features are already in [B, T, F] format from dataset
             features = features.to(self.device)
             targets = targets.to(self.device)
 
@@ -341,6 +352,11 @@ class Trainer:
             metrics_tensor = torch.tensor([total_loss, correct, total], device=self.device)
             dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
             total_loss, correct, total = metrics_tensor.tolist()
+
+            # Gather predictions for F1/Precision/Recall/AUC calculation
+            all_preds = self._gather_lists(all_preds)
+            all_targets = self._gather_lists(all_targets)
+            all_probs = self._gather_lists(all_probs)
 
         val_loss = total_loss / len(self.val_loader) if len(self.val_loader) > 0 else 0
         val_acc = correct / total if total > 0 else 0
