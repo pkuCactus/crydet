@@ -31,10 +31,14 @@
 | 频率范围 | 250-8000Hz | 聚焦啼哭有效频段 |
 | 预加重 | 0.95 | 补偿高频衰减 |
 
-### 2.2 特征维度
-- 5秒音频 → 16000×5 = 80000 采样点
-- 帧数: (80000 + 512) / 512 ≈ 157 帧
-- 输出形状: `[batch, 64, 157]` (channels-first for Transformer)
+### 2.2 特征维度计算
+- **输入音频**: 5秒 @ 16kHz → 80,000 采样点
+- **帧数计算**:
+  - 帧移 (hop_length) = 512 样本 = 32ms
+  - 帧数 = ceil(80000 / 512) = **157 帧**
+- **输出形状**: `[batch, time_frames, n_mels]` = `[B, 157, 64]`
+  - 时间维度 (157帧) 作为 Transformer 的序列长度
+  - Mel维度 (64) 作为每个 token 的特征维度
 
 ### 2.3 归一化策略
 - **频带归一化**: 每帧独立归一化到 [0, 1]
@@ -47,29 +51,40 @@
 ### 3.1 架构概览
 
 ```
-Input: [B, 64, 157] (FBank features)
+Input: [B, T, 64] (FBank features: batch, time_frames, n_mels)
     ↓
 ┌─────────────────────────────────────┐
-│  Patch Embedding                      │
-│  - Conv1d: 64 → d_model               │
-│  - Positional Encoding                │
+│  Linear Projection                    │
+│  - Linear: 64 → d_model               │
+│  - 将每个时间帧的特征投影到d_model维度  │
 └─────────────────────────────────────┘
-    ↓ [B, d_model, num_patches]
+    ↓ [B, T, d_model]  (T=157, d_model=256/512等)
+┌─────────────────────────────────────┐
+│  Positional Encoding                  │
+│  - 正弦/余弦位置编码 或 可学习位置编码  │
+└─────────────────────────────────────┘
+    ↓ [B, T, d_model]
 ┌─────────────────────────────────────┐
 │  Transformer Encoder × N layers       │
 │  - Multi-Head Self-Attention          │
 │  - Feed-Forward Network               │
 │  - LayerNorm + Residual               │
 └─────────────────────────────────────┘
-    ↓ [B, d_model]
+    ↓ [B, T, d_model]
 ┌─────────────────────────────────────┐
 │  Classification Head                  │
-│  - Global Average Pooling             │
+│  - Global Average Pooling (over T)    │
 │  - Linear: d_model → 2                │
 └─────────────────────────────────────┘
     ↓
 Output: [B, 2] (cry / non-cry logits)
 ```
+
+**关键设计**:
+- 时间维度 (T=157帧) 直接作为 Transformer 的序列长度
+- 每帧的64维FBank特征作为一个token的输入维度
+- 通过线性层投影到d_model，而非使用卷积进行patch嵌入
+- 这种设计更好地保留时间序列特性，适合音频时序建模
 
 ### 3.2 模型大小配置
 
@@ -106,13 +121,19 @@ d_model * n_layers < 3000  →  depthwise attention + inverted bottleneck
 
 ### 3.4 关键设计决策
 
-#### 3.4.1 Patch Embedding
-替代传统的帧级输入，使用卷积进行Patch嵌入：
+#### 3.4.1 线性投影层
+直接将每帧的FBank特征投影到d_model维度，替代卷积Patch嵌入：
 ```python
-# 将时间维度进行Patch分割
-Conv1d(in_channels=64, out_channels=d_model, kernel_size=3, stride=2, padding=1)
-# 输出: [B, d_model, 79] (157//2 ≈ 79 patches)
+# 输入: [B, T, 64]  (T=157帧, 64=n_mels)
+# 线性投影: 64 → d_model
+Linear(in_features=64, out_features=d_model)
+# 输出: [B, T, d_model]  (保留时间维度T)
 ```
+
+与卷积Patch嵌入相比的优势：
+- 保留完整的时间分辨率（157帧）
+- 更适合音频时序建模
+- 更简单的架构，易于部署
 
 #### 3.4.2 相对位置编码
 使用可学习的相对位置编码替代绝对位置编码：
