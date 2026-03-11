@@ -1,0 +1,111 @@
+# CryTransformer Large Configuration
+# High-performance model for server/cloud deployment
+
+# Feature extraction settings
+feature:
+  feature_type: fbank
+  n_mels: 64
+  n_fft: 1024
+  hop_length: 512
+  fmin: 250
+  fmax: 8000
+  preemphasis: 0.95
+  use_fbank_norm: true
+  use_delta: true
+  use_freq_delta: true
+
+# Dataset settings
+dataset:
+  audio_suffixes:
+    - .wav
+    - .mp3
+    - .flac
+  sample_rate: 16000
+  slice_len: 5.0
+  stride: 3.0
+  cry_rate: 0.5
+  cache_dir: ./audio_cache
+  force_mono: true
+
+# Data augmentation settings
+augmentation:
+  mixup:
+    cry_mix_prob: 0.3
+    cry_mix_rate_mean: 0.3
+    cry_mix_rate_std: 0.15
+    other_mix_prob: 0.3
+    mix_front_prob: 0.7
+  cry_aug_prob: 0.9
+  other_aug_prob: 0.6
+  other_reverse_prob: 0.5
+  pitch_prob: 0.5
+  reverb_prob: 0.8
+  phaser_prob: 0.5
+  echo_prob: 0.5
+  noise_prob: 0.1
+  gain_prob: 0.9
+
+# Model settings
+# Architecture is controlled by layer parameters (d_model, n_layers, n_heads)
+# Set attention_type and ffn_type to 'auto' for automatic selection based on size
+model:
+  model_type: transformer
+  num_classes: 2
+
+  # Core architecture parameters - adjust these to control model size
+  d_model: 512              # Hidden dimension (larger = more capacity)
+  n_heads: 8                # Attention heads (must divide d_model)
+  n_layers: 12              # Number of transformer layers (deeper = more capacity)
+  d_ff: 2048                # Feed-forward dimension (typically 2-4x d_model)
+  dropout: 0.1
+  attention_dropout: 0.1
+
+  # Patch embedding
+  patch_size: 3
+  patch_stride: 2
+
+  # Positional encoding
+  max_seq_len: 200
+  use_relative_pos: true
+
+  # Attention and FFN types: 'standard', 'linear', 'depthwise', 'inverted_bottleneck', or 'auto'
+  # When set to 'auto', efficient variants are selected for smaller models
+  attention_type: auto
+  ffn_type: auto
+
+  # Pooling: 'mean', 'max', 'attention'
+  pool_type: mean
+
+  # Label smoothing for training
+  label_smoothing: 0.1
+
+# Training settings
+training:
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+  num_epochs: 100
+  learning_rate: 0.0005
+  weight_decay: 0.05
+  grad_clip: 1.0
+  early_stopping_patience: 15
+  checkpoint_dir: ./checkpoints/large
+  log_dir: ./logs/large
+  use_augmentation: true
+  device: cuda
+  log_interval: 10
+  val_interval: 1
+  save_best_only: true
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 5
+  min_lr: 0.000001
+  use_focal_loss: true
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  use_spec_augment: true
+  spec_augment_freq_mask: 8
+  spec_augment_time_mask: 20
+  use_swa: true
+  swa_start: 70
+  swa_lr: 0.0001

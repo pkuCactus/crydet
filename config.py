@@ -108,21 +108,43 @@ class AugmentationConfig:
 @dataclass
 class FeatureConfig:
     """Feature extraction configuration"""
+    # Feature type: 'fbank', 'mfcc', 'fft', 'all'
     feature_type: str = 'fbank'
-    n_mfcc: Optional[int] = 40
-    n_mels: Optional[int] = 64
+
+    # FFT parameters
     n_fft: int = 1024
-    hop_length: int = 512
+    hop_length: int = 500  # ~31.25ms frame shift at 16kHz
+
+    # Mel filterbank parameters
+    n_mels: int = 32
+    n_mfcc: int = 16
     fmin: int = 250
-    fmax: Optional[int] = 8000
-    normalize: bool = True
-    use_delta: bool = True
-    use_freq_delta: bool = True
+    fmax: int = 8000
+
+    # Preemphasis
+    preemphasis: float = 0.95
+
+    # Normalization
+    use_fbank_norm: bool = True
+    use_db_norm: bool = False
+    fbank_decay: float = 0.9  # Exponential smoothing decay
+
+    # Energy feature
+    db_avg_win: float = 0.0  # Energy averaging window
+
+    # Output configuration
+    use_delta: bool = False  # Time delta features
+    use_freq_delta: bool = False  # Frequency delta features
 
     @property
     def feature_dim(self) -> int:
         """Return feature dimension based on feature type"""
-        return self.n_mfcc if self.feature_type == 'mfcc' else self.n_mels
+        if self.feature_type == 'mfcc':
+            return self.n_mfcc
+        elif self.feature_type == 'fft':
+            return self.n_fft // 2 + 1
+        else:  # fbank or all
+            return self.n_mels
 
     @property
     def num_channels(self) -> int:
@@ -133,6 +155,11 @@ class FeatureConfig:
         if self.use_freq_delta:
             channels += 1
         return channels
+
+    @property
+    def frames_per_second(self) -> int:
+        """Return frames per second"""
+        return 16000 // self.hop_length
 
 
 @dataclass
@@ -154,18 +181,159 @@ class DatasetConfig:
 
 @dataclass
 class ModelConfig:
-    """Model configuration"""
+    """Model configuration for Transformer-based cry detection
+
+    Model size is controlled by architecture parameters (d_model, n_layers, etc.)
+    rather than preset variants. The attention_type and ffn_type are auto-selected
+    based on model size unless explicitly specified.
+
+    Size guidelines:
+    - Large model: d_model >= 512, n_layers >= 8
+    - Medium model: d_model 128-512, n_layers 3-8
+    - Tiny model: d_model < 128 or n_layers < 3
+    """
     model_type: str = 'transformer'
     num_classes: int = 2
-    d_model: int = 256
-    n_heads: int = 4
-    n_layers: int = 8
-    d_ff: int = 512
+
+    # Transformer core parameters - control model size with these
+    d_model: int = 256          # Hidden dimension (larger = more capacity)
+    n_heads: int = 4            # Attention heads (must divide d_model)
+    n_layers: int = 6           # Number of transformer layers (deeper = more capacity)
+    d_ff: int = 1024            # Feed-forward dimension (typically 2-4x d_model)
     dropout: float = 0.1
+    attention_dropout: float = 0.1
+
+    # Patch embedding
+    patch_size: int = 3
+    patch_stride: int = 2
+
+    # Positional encoding
+    max_seq_len: int = 200
+    use_relative_pos: bool = True
+
+    # Attention variant: 'standard', 'linear', 'depthwise'
+    # If 'auto', will be selected based on model size
+    attention_type: str = 'auto'
+
+    # FFN variant: 'standard', 'inverted_bottleneck'
+    # If 'auto', will be selected based on model size
+    ffn_type: str = 'auto'
+
+    # Pooling: 'mean', 'max', 'attention'
+    pool_type: str = 'mean'
+
+    # Label smoothing for training
+    label_smoothing: float = 0.1
 
     def __post_init__(self):
-        """Validate model configuration"""
+        """Validate model configuration and auto-select efficient settings"""
         assert self.d_model % self.n_heads == 0, "d_model must be divisible by n_heads"
+
+        # Auto-select attention type based on model size
+        if self.attention_type == 'auto':
+            self.attention_type = self._select_attention_type()
+
+        # Auto-select FFN type based on model size
+        if self.ffn_type == 'auto':
+            self.ffn_type = self._select_ffn_type()
+
+    def _select_attention_type(self) -> str:
+        """Select attention type based on model size"""
+        total_params = self.d_model * self.n_layers
+        if total_params >= 3000:  # d_model * n_layers >= 3000 (e.g., 512*6, 256*12)
+            return 'standard'  # Full attention for large models
+        elif total_params >= 1000:  # Medium models
+            return 'standard'  # Or 'linear' for efficiency
+        else:  # Small models
+            return 'depthwise'  # Efficient depthwise separable attention
+
+    def _select_ffn_type(self) -> str:
+        """Select FFN type based on model size"""
+        _ = self.d_model * self.n_layers  # For potential future use
+        if self.d_model >= 512:
+            return 'standard'  # Full FFN for large models
+        else:
+            return 'inverted_bottleneck'  # Efficient FFN for smaller models
+
+    @property
+    def variant(self) -> str:
+        """Derive variant name from architecture parameters"""
+        total_params = self.d_model * self.n_layers
+        if self.d_model >= 512 or self.n_layers >= 10:
+            return 'large'
+        elif self.d_model <= 128 or self.n_layers <= 3:
+            return 'tiny'
+        else:
+            return 'medium'
+
+    @property
+    def estimated_params(self) -> int:
+        """Estimate total parameter count"""
+        # Embedding + Transformer layers + Classifier
+        embedding_params = 64 * self.d_model * 9  # ~9 for typical conv kernel
+        layer_params = self.n_layers * (
+            4 * self.d_model * self.d_model +  # Q, K, V, O projections
+            2 * self.d_model * self.d_ff       # FFN
+        )
+        classifier_params = self.d_model * self.num_classes
+        return embedding_params + layer_params + classifier_params
+
+    @property
+    def size_category(self) -> str:
+        """Return model size category for deployment guidance"""
+        params = self.estimated_params
+        if params > 20_000_000:
+            return 'server/cloud (GPU recommended)'
+        elif params > 5_000_000:
+            return 'edge device (ARM CPU/GPU)'
+        elif params > 1_000_000:
+            return 'embedded (Raspberry Pi, Edge TPU)'
+        else:
+            return 'microcontroller (Cortex-M, ESP32)'
+
+    @classmethod
+    def large(cls) -> 'ModelConfig':
+        """High-performance configuration for server/cloud deployment"""
+        return cls(
+            variant='large',
+            d_model=512,
+            n_heads=8,
+            n_layers=12,
+            d_ff=2048,
+            dropout=0.1,
+            attention_type='standard',
+            ffn_type='standard',
+        )
+
+    @classmethod
+    def medium(cls) -> 'ModelConfig':
+        """Lightweight configuration for edge devices (Raspberry Pi, Edge TPU)"""
+        return cls(
+            variant='medium',
+            d_model=256,
+            n_heads=4,
+            n_layers=6,
+            d_ff=1024,
+            dropout=0.1,
+            attention_type='standard',
+            ffn_type='inverted_bottleneck',
+        )
+
+    @classmethod
+    def tiny(cls) -> 'ModelConfig':
+        """Ultra-lightweight configuration for MCU (Cortex-M, ESP32)"""
+        return cls(
+            variant='tiny',
+            d_model=128,
+            n_heads=2,
+            n_layers=3,
+            d_ff=256,
+            dropout=0.1,
+            attention_type='depthwise',
+            ffn_type='inverted_bottleneck',
+            patch_size=5,
+            patch_stride=3,
+        )
 
 
 @dataclass
@@ -177,7 +345,7 @@ class TrainingConfig:
     num_epochs: int = 100
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
-    grad_clip: Optional[float] = None
+    grad_clip: Optional[float] = 1.0
     early_stopping_patience: Optional[int] = 10
     checkpoint_dir: str = './checkpoints'
     log_dir: str = './logs'
@@ -186,6 +354,27 @@ class TrainingConfig:
     log_interval: int = 10
     val_interval: int = 1
     save_best_only: bool = True
+
+    # Optimizer settings
+    optimizer: str = 'adamw'  # 'adam', 'adamw', 'sgd'
+    scheduler: str = 'cosine'  # 'step', 'cosine', 'plateau', 'none'
+    warmup_epochs: int = 5
+    min_lr: float = 1e-6
+
+    # Loss settings
+    use_focal_loss: bool = True
+    focal_alpha: float = 0.25
+    focal_gamma: float = 2.0
+
+    # SpecAugment settings
+    use_spec_augment: bool = True
+    spec_augment_freq_mask: int = 8
+    spec_augment_time_mask: int = 20
+
+    # SWA (Stochastic Weight Averaging)
+    use_swa: bool = False
+    swa_start: int = 70
+    swa_lr: float = 1e-4
 
 
 @dataclass

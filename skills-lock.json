@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "code-simplifier": {
+      "source": "simonwong/agent-skills",
+      "sourceType": "github",
+      "computedHash": "788e5d6d1b1b887c75f43a3932889592baf28b193ba8e43895d9d0002a85ea24"
+    }
+  }
+}

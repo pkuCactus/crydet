@@ -1,0 +1,111 @@
+# CryTransformer Tiny Configuration
+# Ultra-lightweight model for MCU deployment (Cortex-M, ESP32)
+
+# Feature extraction settings
+feature:
+  feature_type: fbank
+  n_mels: 32
+  n_fft: 1024
+  hop_length: 512
+  fmin: 250
+  fmax: 8000
+  preemphasis: 0.95
+  use_fbank_norm: true
+  use_delta: false
+  use_freq_delta: false
+
+# Dataset settings
+dataset:
+  audio_suffixes:
+    - .wav
+    - .mp3
+    - .flac
+  sample_rate: 16000
+  slice_len: 5.0
+  stride: 3.0
+  cry_rate: 0.5
+  cache_dir: ./audio_cache
+  force_mono: true
+
+# Data augmentation settings
+augmentation:
+  mixup:
+    cry_mix_prob: 0.2
+    cry_mix_rate_mean: 0.3
+    cry_mix_rate_std: 0.15
+    other_mix_prob: 0.2
+    mix_front_prob: 0.7
+  cry_aug_prob: 0.8
+  other_aug_prob: 0.5
+  other_reverse_prob: 0.5
+  pitch_prob: 0.4
+  reverb_prob: 0.6
+  phaser_prob: 0.4
+  echo_prob: 0.4
+  noise_prob: 0.1
+  gain_prob: 0.8
+
+# Model settings
+# Architecture is controlled by layer parameters (d_model, n_layers, n_heads)
+# Set attention_type and ffn_type to 'auto' for automatic selection based on size
+model:
+  model_type: transformer
+  num_classes: 2
+
+  # Core architecture parameters - adjust these to control model size
+  d_model: 128              # Hidden dimension (smaller = more efficient)
+  n_heads: 2                # Attention heads (must divide d_model)
+  n_layers: 3               # Number of transformer layers (fewer = faster)
+  d_ff: 256                 # Feed-forward dimension (typically 2-4x d_model)
+  dropout: 0.1
+  attention_dropout: 0.1
+
+  # Patch embedding (larger stride for efficiency)
+  patch_size: 5
+  patch_stride: 3
+
+  # Positional encoding
+  max_seq_len: 100
+  use_relative_pos: false
+
+  # Attention and FFN types: 'standard', 'linear', 'depthwise', 'inverted_bottleneck', or 'auto'
+  # When set to 'auto', efficient variants are selected for smaller models
+  attention_type: auto
+  ffn_type: auto
+
+  # Pooling: 'mean', 'max', 'attention'
+  pool_type: mean
+
+  # Label smoothing for training
+  label_smoothing: 0.05
+
+# Training settings
+training:
+  batch_size: 128
+  num_workers: 4
+  pin_memory: true
+  num_epochs: 150
+  learning_rate: 0.002
+  weight_decay: 0.001
+  grad_clip: 1.0
+  early_stopping_patience: 20
+  checkpoint_dir: ./checkpoints/tiny
+  log_dir: ./logs/tiny
+  use_augmentation: true
+  device: cuda
+  log_interval: 10
+  val_interval: 1
+  save_best_only: true
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 10
+  min_lr: 0.000001
+  use_focal_loss: true
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  use_spec_augment: true
+  spec_augment_freq_mask: 4
+  spec_augment_time_mask: 10
+  use_swa: false
+  swa_start: 100
+  swa_lr: 0.0001

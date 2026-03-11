@@ -1,6 +1,7 @@
 """
 特征提取示例
-演示如何读取音频文件并提取 MFCC/Filter Bank 特征
+演示如何读取音频文件并提取 FFT/FBank/MFCC/Energy 特征
+参考: docs/feature_extraction_flow.md
 """
 
 import sys
@@ -30,7 +31,7 @@ def extract_features_from_file(
         sample_rate: 目标采样率
 
     Returns:
-        features: 提取的特征 (feature_dim, time_frames)
+        features: 字典，包含 fft, fbank, mfcc, db
         waveform: 原始波形
         sr: 采样率
     """
@@ -52,69 +53,65 @@ def extract_features_from_file(
 
     # 提取特征
     features = extractor.extract(waveform, sr)
-    print(f"特征形状: {features.shape}")
-    print(f"  - 特征维度: {features.shape[0]}")
-    print(f"  - 时间帧数: {features.shape[1]}")
+
+    print(f"\n提取的特征:")
+    for name, feat in features.items():
+        print(f"  {name}: shape={feat.shape}, min={feat.min():.3f}, max={feat.max():.3f}")
 
     return features, waveform, sr
 
 
 def visualize_features(
-    features: np.ndarray,
-    config: FeatureConfig,
+    features: dict,
     save_path: str = None
 ):
     """
-    可视化特征
+    可视化所有特征
 
     Args:
-        features: 特征矩阵 (feature_dim, time_frames)
+        features: 特征字典
         config: 特征配置
         save_path: 保存路径 (可选)
     """
-    n_channels = config.num_channels
-    feature_dim = config.feature_dim
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12))
 
-    fig, axes = plt.subplots(n_channels, 1, figsize=(12, 4 * n_channels))
+    feature_names = ['fft', 'fbank', 'mfcc', 'db']
+    titles = [
+        f"FFT Magnitude Spectrum ({features['fft'].shape[0]} bins)",
+        f"FBank (Log Mel Spectrum, {features['fbank'].shape[0]} mels)",
+        f"MFCC ({features['mfcc'].shape[0]} coefficients)",
+        f"Energy (dB) - [Average, Weighted]"
+    ]
 
-    if n_channels == 1:
-        axes = [axes]
-
-    channel_names = ['Base']
-    if config.use_delta:
-        channel_names.append('Delta (Time)')
-    if config.use_freq_delta:
-        channel_names.append('Delta (Freq)')
-
-    for i, (ax, name) in enumerate(zip(axes, channel_names)):
-        start_idx = i * feature_dim
-        end_idx = (i + 1) * feature_dim
-        channel_features = features[start_idx:end_idx, :]
-
-        im = ax.imshow(channel_features, aspect='auto', origin='lower', cmap='viridis')
-        ax.set_title(f'{name} Features')
+    for ax, name, title in zip(axes, feature_names, titles):
+        feat = features[name]
+        im = ax.imshow(feat, aspect='auto', origin='lower', cmap='viridis')
+        ax.set_title(title)
         ax.set_ylabel('Feature Dim')
         ax.set_xlabel('Time Frames')
+        plt.colorbar(im, ax=ax, shrink=0.8)
 
     plt.tight_layout()
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"特征可视化已保存到: {save_path}")
+        print(f"\n特征可视化已保存到: {save_path}")
     else:
         plt.show()
 
+    plt.close()
 
-def compare_feature_types(audio_path: str, sample_rate: int = 16000):
+
+def compare_configs(audio_path: str, sample_rate: int = 16000):
     """
-    比较不同特征类型的输出
+    比较不同配置的特征提取
 
     Args:
         audio_path: 音频文件路径
         sample_rate: 采样率
     """
     print("\n" + "=" * 60)
-    print("比较不同特征类型")
+    print("比较不同特征配置")
     print("=" * 60)
 
     # 读取音频
@@ -122,24 +119,33 @@ def compare_feature_types(audio_path: str, sample_rate: int = 16000):
     waveform, sr = audio_reader.load(audio_path)
 
     configs = [
-        ("FBank (64 mel)", FeatureConfig(feature_type='fbank', n_mels=64)),
-        ("FBank (128 mel)", FeatureConfig(feature_type='fbank', n_mels=128)),
-        ("MFCC (40)", FeatureConfig(feature_type='mfcc', n_mfcc=40, n_mels=64)),
-        ("FBank + Delta", FeatureConfig(feature_type='fbank', n_mels=64, use_delta=True, use_freq_delta=False)),
-        ("FBank + Delta + FreqDelta", FeatureConfig(feature_type='fbank', n_mels=64, use_delta=True, use_freq_delta=True)),
+        ("FBank (32 mel, norm)", FeatureConfig(n_mels=32, use_fbank_norm=True)),
+        ("FBank (64 mel, norm)", FeatureConfig(n_mels=64, use_fbank_norm=True)),
+        ("FBank (no norm)", FeatureConfig(n_mels=32, use_fbank_norm=False)),
+        ("MFCC (16)", FeatureConfig(feature_type='mfcc', n_mfcc=16)),
+        ("MFCC (32)", FeatureConfig(feature_type='mfcc', n_mfcc=32)),
     ]
 
     fig, axes = plt.subplots(len(configs), 1, figsize=(14, 3 * len(configs)))
 
-    for i, (name, cfg) in enumerate(configs):
-                extractor = FeatureExtractor(cfg)
-                features = extractor.extract(waveform, sr)
+    audio_reader = AudioReader(target_sr=sample_rate, force_mono=True)
+    waveform, sr = audio_reader.load(audio_path)
 
-                ax = axes[i] if len(configs) > 1 else axes
-                im = ax.imshow(features, aspect='auto', origin='lower', cmap='viridis')
-                ax.set_title(f'{name}\nShape: {features.shape}')
-                ax.set_ylabel('Feature Dim')
-                ax.set_xlabel('Time Frames')
+    for i, (name, cfg) in enumerate(configs):
+        extractor = FeatureExtractor(cfg)
+        features = extractor.extract(waveform, sr)
+
+        # 选择要显示的特征
+        if cfg.feature_type == 'mfcc':
+            feat = features['mfcc']
+        else:
+            feat = features['fbank']
+
+        ax = axes[i] if len(configs) > 1 else axes
+        im = ax.imshow(feat, aspect='auto', origin='lower', cmap='viridis')
+        ax.set_title(f'{name}\nShape: {feat.shape}')
+        ax.set_ylabel('Feature Dim')
+        ax.set_xlabel('Time Frames')
 
     plt.tight_layout()
     plt.savefig('feature_comparison.png', dpi=150, bbox_inches='tight')
@@ -192,20 +198,24 @@ def main():
     else:
         print(f"\n[1] 使用测试音频: {audio_path}")
 
-    # 加载配置
+    # 加载或使用默认配置
     if Path(config_path).exists():
         config = load_config(config_path)
         feature_config = config.feature
     else:
         feature_config = FeatureConfig()
+
     print(f"\n[2] 特征配置:")
-    print(f"    类型: {feature_config.feature_type}")
-    print(f"    n_mels: {feature_config.n_mels}")
+    print(f"    feature_type: {feature_config.feature_type}")
     print(f"    n_fft: {feature_config.n_fft}")
     print(f"    hop_length: {feature_config.hop_length}")
-    print(f"    use_delta: {feature_config.use_delta}")
-    print(f"    use_freq_delta: {feature_config.use_freq_delta}")
-    print(f"    normalize: {feature_config.normalize}")
+    print(f"    n_mels: {feature_config.n_mels}")
+    print(f"    n_mfcc: {feature_config.n_mfcc}")
+    print(f"    fmin: {feature_config.fmin}")
+    print(f"    fmax: {feature_config.fmax}")
+    print(f"    preemphasis: {feature_config.preemphasis}")
+    print(f"    use_fbank_norm: {feature_config.use_fbank_norm}")
+    print(f"    frames_per_second: {feature_config.frames_per_second}")
 
     # 提取特征
     print(f"\n[3] 提取特征")
@@ -213,22 +223,15 @@ def main():
         audio_path, feature_config
     )
 
-    # 输出特征统计
-    print(f"\n[4] 特征统计:")
-    print(f"    最小值: {features.min():.4f}")
-    print(f"    最大值: {features.max():.4f}")
-    print(f"    均值: {features.mean():.4f}")
-    print(f"    标准差: {features.std():.4f}")
-
     # 可视化特征
-    print(f"\n[5] 可视化特征")
+    print(f"\n[4] 可视化特征")
     visualize_features(
-        features, feature_config,
+        features,
         save_path='feature_visualization.png'
     )
 
-    # 比较不同特征类型
-    compare_feature_types(audio_path)
+    # 比较不同配置
+    compare_configs(audio_path)
 
     # 清理测试文件
     if Path('_test_audio.wav').exists():

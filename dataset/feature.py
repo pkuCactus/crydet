@@ -1,10 +1,12 @@
 """
 Feature Extraction for Baby Cry Detection
-Supports MFCC and Filter Bank features with delta features
+Supports MFCC, Filter Bank, FFT and Energy features with normalization
+Reference: docs/feature_extraction_flow.md
 """
 
 import numpy as np
 import librosa
+from typing import Dict
 
 from config import FeatureConfig
 
@@ -14,10 +16,20 @@ class FeatureExtractor:
     Feature extractor for audio classification
 
     Supports:
+    - FFT (magnitude spectrum)
+    - FBank (Mel filter bank / log Mel spectrum)
     - MFCC (Mel-frequency cepstral coefficients)
-    - Filter Bank (mel spectrogram)
-    - Delta features (time derivative) - concatenated along feature dimension
-    - Frequency delta features - concatenated along feature dimension
+    - DB (Energy features: average and weighted)
+
+    Processing pipeline:
+    1. Preemphasis filtering
+    2. Framing with Hanning window
+    3. FFT computation
+    4. Mel filter bank application
+    5. Log transformation
+    6. MFCC computation (optional)
+    7. Energy feature computation
+    8. Normalization
     """
 
     def __init__(self, config: FeatureConfig):
@@ -29,137 +41,208 @@ class FeatureExtractor:
         """
         self.config = config
 
-    def extract(self, y: np.ndarray, sr: int) -> np.ndarray:
+        # Pre-compute Hanning window
+        self._window = np.hanning(config.n_fft)
+        self._window_area = np.sum(self._window ** 2)
+
+        # Mel filter bank matrix (computed lazily)
+        self._mel_matrix = None
+        self._sr = 16000  # Default sample rate
+
+    def _get_mel_matrix(self, sr: int) -> np.ndarray:
+        """Get or compute Mel filter bank matrix"""
+        if self._mel_matrix is None or self._sr != sr:
+            self._mel_matrix = librosa.filters.mel(
+                sr=sr,
+                n_fft=self.config.n_fft,
+                n_mels=self.config.n_mels,
+                fmin=self.config.fmin,
+                fmax=self.config.fmax
+            )
+            self._sr = sr
+        return self._mel_matrix
+
+    def preemphasis(self, signal: np.ndarray) -> np.ndarray:
         """
-        Extract features from audio waveform
+        Apply preemphasis filter to signal
+
+        y[n] = x[n] - coeff * x[n-1]
+
+        Args:
+            signal: Input audio signal
+
+        Returns:
+            Preemphasized signal
+        """
+        coeff = self.config.preemphasis
+        if coeff <= 0:
+            return signal
+        return np.append(signal[0], signal[1:] - coeff * signal[:-1])
+
+    def extract(self, y: np.ndarray, sr: int) -> Dict[str, np.ndarray]:
+        """
+        Extract all features from audio waveform
 
         Args:
             y: Audio waveform (1D numpy array)
             sr: Sample rate
 
         Returns:
-            Feature array with shape (feature_dim, time_frames)
-            - feature_dim = base_dim + (delta_dim if use_delta) + (freq_delta_dim if use_freq_delta)
+            Dictionary containing:
+            - 'fft': FFT magnitude spectrum (n_fft//2+1, frames)
+            - 'fbank': Log Mel filter bank features (n_mels, frames)
+            - 'mfcc': MFCC features (n_mfcc, frames)
+            - 'db': Energy features (2, frames) [average, weighted]
         """
         # Ensure mono
         if y.ndim > 1:
             y = np.mean(y, axis=0)
 
-        # Extract base features
-        if self.config.feature_type == 'mfcc':
-            features = self._extract_mfcc(y, sr)
-        else:
-            features = self._extract_fbank(y, sr)
+        # Normalize amplitude
+        y = librosa.util.normalize(y)
 
-        # Collect features to concatenate along feature dimension
-        feature_list = [features]
+        # Apply preemphasis
+        y_preemph = self.preemphasis(y)
 
-        if self.config.use_delta:
-            delta = self._compute_delta(features)
-            feature_list.append(delta)
+        # Pad signal for framing
+        n_fft = self.config.n_fft
+        hop_length = self.config.hop_length
+        y_padded = np.pad(y_preemph, (n_fft - hop_length, 0), mode='constant')
 
-        if self.config.use_freq_delta:
-            freq_delta = self._compute_freq_delta(features)
-            feature_list.append(freq_delta)
+        # Frame the signal
+        frames = librosa.util.frame(y_padded, frame_length=n_fft, hop_length=hop_length)
 
-        # Concatenate along feature dimension (axis 0)
-        features = np.concatenate(feature_list, axis=0)
+        # Compute energy from original signal (before preemphasis)
+        y_padded_orig = np.pad(y, (n_fft - hop_length, 0), mode='constant')
+        y_squared = y_padded_orig ** 2
+        energy_frames = librosa.util.frame(y_squared, frame_length=n_fft, hop_length=hop_length)
 
-        # Normalize if configured
-        if self.config.normalize:
-            features = self._normalize(features)
+        # Apply Hanning window
+        windowed_frames = frames * self._window[:, np.newaxis]
 
-        return features.astype(np.float32)
+        # Compute FFT
+        fft_result = np.fft.rfft(windowed_frames, axis=0)
+        fft_magnitude = np.abs(fft_result)  # (n_fft//2+1, frames)
 
-    def _extract_mfcc(self, y: np.ndarray, sr: int) -> np.ndarray:
-        """Extract MFCC features"""
+        # Compute Mel spectrum
+        mel_matrix = self._get_mel_matrix(sr)
+        mel_spectrum = np.dot(mel_matrix, fft_magnitude)  # (n_mels, frames)
+
+        # Log transformation (avoid log(0))
+        log_mel = np.log(np.maximum(mel_spectrum, 1e-8))
+
+        # Compute MFCC from log Mel spectrum
         mfcc = librosa.feature.mfcc(
-            y=y,
-            sr=sr,
+            S=log_mel.T,
             n_mfcc=self.config.n_mfcc,
-            n_fft=self.config.n_fft,
-            hop_length=self.config.hop_length,
             n_mels=self.config.n_mels,
             fmin=self.config.fmin,
-            fmax=self.config.fmax,
-        )
-        return mfcc
+            fmax=self.config.fmax
+        ).T  # (n_mfcc, frames)
 
-    def _extract_fbank(self, y: np.ndarray, sr: int) -> np.ndarray:
-        """Extract filter bank (mel spectrogram) features"""
-        fbank = librosa.feature.melspectrogram(
-            y=y,
-            sr=sr,
-            n_fft=self.config.n_fft,
-            hop_length=self.config.hop_length,
-            n_mels=self.config.n_mels,
-            fmin=self.config.fmin,
-            fmax=self.config.fmax,
-        )
-        # Convert to log scale
-        fbank = librosa.power_to_db(fbank, ref=np.max)
-        return fbank
+        # Compute energy features (in dB)
+        # 1. Average energy per frame
+        avg_energy = np.mean(energy_frames, axis=0)
+        db_avg = energy_to_db(avg_energy)
 
-    def _normalize(self, features: np.ndarray) -> np.ndarray:
+        # 2. Hanning-windowed energy
+        weighted_energy = np.sum(energy_frames * (self._window[:, np.newaxis] ** 2), axis=0) / self._window_area
+        db_weighted = energy_to_db(weighted_energy)
+
+        # Stack energy features
+        db_features = np.stack([db_avg, db_weighted], axis=0)  # (2, frames)
+
+        # Apply FBank normalization
+        fbank = log_mel
+        if self.config.use_fbank_norm:
+            fbank = self._normalize_fbank(fbank)
+
+        # Transpose to (feature_dim, frames) format
+        features = {
+            'fft': fft_magnitude,
+            'fbank': fbank,
+            'mfcc': mfcc,
+            'db': db_features
+        }
+
+        return features
+
+    def _normalize_fbank(self, fbank: np.ndarray) -> np.ndarray:
         """
-        Normalize features per frequency band
+        Normalize FBank features with exponential smoothing
 
         Args:
-            features: Feature matrix (feature_dim, time_frames)
+            fbank: Log Mel filter bank features (n_mels, frames)
 
         Returns:
-            Normalized features
+            Normalized features in [0, 1] range
         """
-        mean = np.mean(features, axis=1, keepdims=True)
-        std = np.std(features, axis=1, keepdims=True)
-        std = np.maximum(std, 1e-8)  # Avoid division by zero
-        return (features - mean) / std
+        decay = self.config.fbank_decay
 
-    def _compute_delta(self, features: np.ndarray) -> np.ndarray:
+        # Compute global max/min across frequency axis
+        fbank_max = np.max(fbank, axis=0, keepdims=True)  # (1, frames)
+        fbank_min = np.min(fbank, axis=0, keepdims=True)  # (1, frames)
+
+        # Exponential smoothing of max values along time axis
+        if decay > 0 and fbank_max.shape[1] > 1:
+            smoothed_max = np.zeros_like(fbank_max)
+            smoothed_max[0, 0] = fbank_max[0, 0]
+            for i in range(1, fbank_max.shape[1]):
+                if fbank_max[0, i] > smoothed_max[0, i-1]:
+                    smoothed_max[0, i] = decay * smoothed_max[0, i-1] + (1 - decay) * fbank_max[0, i]
+                else:
+                    smoothed_max[0, i] = fbank_max[0, i]
+            fbank_max = smoothed_max
+
+        # Normalize to [0, 1]
+        range_val = fbank_max - fbank_min
+        range_val = np.where(range_val > 0, range_val, 1.0)
+
+        fbank_norm = (fbank - fbank_min) / range_val
+        fbank_norm = np.clip(fbank_norm, 0.0, 1.0)
+
+        return fbank_norm
+
+    def extract_single(self, y: np.ndarray, sr: int) -> np.ndarray:
         """
-        Compute delta (time derivative) features
+        Extract single feature type (configured in feature_type)
 
         Args:
-            features: Base feature matrix (n_mels, time_frames)
+            y: Audio waveform
+            sr: Sample rate
 
         Returns:
-            Delta features with same shape
+            Feature array based on config.feature_type
         """
-        delta = librosa.feature.delta(features, width=9)
-        return delta
+        features = self.extract(y, sr)
 
-    def _compute_freq_delta(self, features: np.ndarray) -> np.ndarray:
-        """
-        Compute frequency delta features (derivative along frequency axis)
+        if self.config.feature_type == 'fft':
+            return features['fft']
+        elif self.config.feature_type == 'mfcc':
+            return features['mfcc']
+        elif self.config.feature_type == 'db':
+            return features['db']
+        else:  # 'fbank' or 'all'
+            return features['fbank']
 
-        Args:
-            features: Base feature matrix (n_mels, time_frames)
-
-        Returns:
-            Frequency delta features
-        """
-        # Compute diff along frequency axis (axis 0)
-        freq_delta = np.zeros_like(features)
-        freq_delta[1:-1, :] = np.diff(features[1:, :] - features[:-1, :], axis=0)
-        freq_delta[0, :] = features[1, :] - features[0, :]
-        freq_delta[-1, :] = features[-1, :] - features[-2, :]
-        return freq_delta
-
-    def __call__(self, y: np.ndarray, sr: int) -> np.ndarray:
+    def __call__(self, y: np.ndarray, sr: int) -> Dict[str, np.ndarray]:
         """Alias for extract method"""
         return self.extract(y, sr)
 
-    @property
-    def output_dim(self) -> int:
-        """
-        Return output feature dimension
 
-        Returns:
-            Total feature dimension (base + delta + freq_delta)
-        """
-        dim = self.config.feature_dim
-        if self.config.use_delta:
-            dim += self.config.feature_dim
-        if self.config.use_freq_delta:
-            dim += self.config.feature_dim
-        return dim
+def energy_to_db(energy: np.ndarray, ref: float = 1.0, amin: float = 1e-8) -> np.ndarray:
+    """
+    Convert energy to decibels
+
+    Args:
+        energy: Energy values
+        ref: Reference value
+        amin: Minimum value to avoid log(0)
+
+    Returns:
+        Energy in decibels, normalized to [0, 1] range
+    """
+    db = 10 * np.log10(np.maximum(energy, amin) / ref)
+    # Normalize to [0, 1] range (clip at -8 dB)
+    db_normalized = (np.maximum(db, -8) + 8) / 8
+    return db_normalized
