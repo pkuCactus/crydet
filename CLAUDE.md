@@ -1,6 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+请使用第一性原理思考。你不能总是假设我非常清楚自己想要什么和该怎么得到。请保持审慎，从原始需求和问题出发，如果动机和目标不清晰，停下来和我讨论。如果目标清晰但是路径不是最短，告诉我，并且建议更好的办法。
 
 ## Project Overview
 
@@ -96,15 +97,21 @@ DataLoader → Model
    - Scans directories → builds `file_schedule_dict[label]`
    - Each entry: `(file_path, start_time, duration, need_pad)`
    - Filters low-energy cry samples (< cry_min_energy_db)
+   - `generate_schedule(shuffle)` regenerates schedules with new random slicing positions
 
 3. **CrySampler** (`dataset/sampler.py`):
    - Balances cry/non-cry sampling based on `cry_rate`
    - Yields `(label, file_idx)` tuples
    - Automatically cycles through samples
+   - `set_epoch(epoch)` regenerates schedule for epoch > 0 (new random slicing + filtering)
 
    **DistributedCrySampler**: Distributed version for DDP training
    - Wraps CrySampler for multi-GPU distributed training
    - Handles data partitioning across replicas
+
+   **SequentialCrySampler**: Sequential sampler for validation
+   - Iterates through all samples without balancing
+   - Used by validation DataLoader
 
 4. **Dataset.__getitem__**:
    - Loads audio segment from file
@@ -126,7 +133,8 @@ DataLoader → Model
 | Component | Key Structure | Description |
 |-----------|---------------|-------------|
 | `file_schedule_dict` | `{label: [(path, start, dur, pad), ...]}` | All audio segments per label |
-| `CrySampler` | yields `(label, idx)` | Balanced sampling indices |
+| `CrySampler` | yields `(label, idx)` | Balanced sampling indices (training) |
+| `SequentialCrySampler` | yields `(label, idx)` | Sequential sampling (validation) |
 | `Dataset.__getitem__` | returns `(features, label)` | `features` shape: `[T, F]` |
 | `collate_fn` | returns `(batch_features, batch_labels)` | `batch_features` shape: `[B, T, F]` |
 
