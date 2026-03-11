@@ -47,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config, ModelConfig, TrainingConfig
 from dataset.dataset import CryDataset
-from dataset.sampler import CrySampler, DistributedCrySampler
+from dataset.sampler import CrySampler, DistributedCrySampler, SequentialCrySampler
 from model import create_model, get_model_info, print_model_summary
 from model.loss import FocalLoss, LabelSmoothingCrossEntropy, CombinedLoss
 
@@ -641,10 +641,11 @@ def main():
 
         if val_dataset:
             # Validation should use all samples without balanced sampling
+            val_sampler = SequentialCrySampler(val_dataset)
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.training.batch_size,
-                shuffle=False,
+                sampler=val_sampler,
                 num_workers=config.training.num_workers,
                 pin_memory=config.training.pin_memory,
                 collate_fn=collate_fn

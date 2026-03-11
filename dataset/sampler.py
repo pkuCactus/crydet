@@ -79,6 +79,35 @@ class CrySampler(Sampler):
             self.data_source.generate_schedule(shuffle=self.shuffle)
 
 
+class SequentialCrySampler(Sampler):
+    """
+    Sequential sampler for validation that iterates through all samples.
+
+    Unlike CrySampler, this sampler does not balance cry/non-cry samples.
+    It simply iterates through all available samples in order.
+
+    Yields (label, file_idx) tuples for all samples in the dataset.
+    """
+
+    def __init__(self, data_source=None):
+        super().__init__()
+        self.data_source = data_source
+
+    def __iter__(self):
+        """Yield (label, file_idx) tuples for all samples sequentially."""
+        for label in self.data_source.file_schedule_dict:
+            for idx in range(len(self.data_source.file_schedule_dict[label])):
+                yield (label, idx)
+
+    def __len__(self):
+        """Return total number of samples"""
+        return sum(len(schedules) for schedules in self.data_source.file_schedule_dict.values())
+
+    def set_epoch(self, epoch: int):
+        """No-op for sequential sampler - validation doesn't need regeneration."""
+        pass
+
+
 def _get_distributed_info(num_replicas: Optional[int], rank: Optional[int]) -> tuple[int, int]:
     """Get distributed training info from environment or defaults."""
     if not dist.is_available():
