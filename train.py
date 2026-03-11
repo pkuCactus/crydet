@@ -638,8 +638,7 @@ def main():
             sampler=train_sampler,
             num_workers=config.training.num_workers,
             pin_memory=config.training.pin_memory,
-            collate_fn=collate_fn,
-            shuffle=shuffle
+            collate_fn=collate_fn
         )
 
         if val_dataset:
