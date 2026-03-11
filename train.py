@@ -150,7 +150,7 @@ class Trainer:
             self.swa_model = torch.optim.swa_utils.AveragedModel(self.raw_model)
 
         # Scaler for mixed precision
-        self.scaler = torch.cuda.amp.GradScaler() if device.type == 'cuda' else None
+        self.scaler = torch.amp.GradScaler() if device.type == 'cuda' else None
 
         self.logger = setup_logger(rank)
 
