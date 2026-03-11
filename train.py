@@ -587,8 +587,8 @@ def setup_distributed() -> Tuple[int, int, torch.device]:
 
     if world_size > 1:
         # Set NCCL environment variables for better stability
-        os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
-        os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+        os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')
+        os.environ.setdefault('TORCH_NCCL_ASYNC_ERROR_HANDLING', '1')
 
         dist.init_process_group(backend='nccl', init_method='env://')
         torch.cuda.set_device(local_rank)
@@ -724,9 +724,9 @@ def main():
             num_workers=config.training.num_workers,
             pin_memory=config.training.pin_memory and device.type == 'cuda',
             collate_fn=collate_fn,
-            worker_init_fn=worker_init_fn,
-            persistent_workers=config.training.num_workers > 0,
-            multiprocessing_context='spawn' if config.training.num_workers > 0 else None
+            worker_init_fn=worker_init_fn if config.training.num_workers > 0 else None,
+            persistent_workers=False,  # Disable to avoid deadlock in DDP
+            drop_last=False
         )
 
         if val_dataset:
@@ -739,9 +739,9 @@ def main():
                 num_workers=config.training.num_workers,
                 pin_memory=config.training.pin_memory and device.type == 'cuda',
                 collate_fn=collate_fn,
-                worker_init_fn=worker_init_fn,
-                persistent_workers=config.training.num_workers > 0,
-                multiprocessing_context='spawn' if config.training.num_workers > 0 else None
+                worker_init_fn=worker_init_fn if config.training.num_workers > 0 else None,
+                persistent_workers=False,  # Disable to avoid deadlock in DDP
+                drop_last=False
             )
 
         # Create model

@@ -120,9 +120,24 @@ class CryDataset(Dataset):
             cry_count / self.config.cry_rate
         ))
 
-    def generate_schedule(self, shuffle: bool = False):
-        """Regenerate file schedules with new random slicing and energy filtering."""
+    def generate_schedule(self, shuffle: bool = False, seed: Optional[int] = None):
+        """Regenerate file schedules with new random slicing and energy filtering.
+
+        Args:
+            shuffle: Whether to shuffle the schedules after generation
+            seed: Random seed for reproducibility across distributed processes.
+                  If provided, will be used to ensure all ranks generate identical schedules.
+        """
+        # Set random seed if provided (for distributed training consistency)
+        if seed is not None:
+            random_state = random.getstate()
+            random.seed(seed)
+
         self.file_schedule_dict = self._get_schedule_dict(self.data_dict)
+
+        # Restore random state if we set a seed
+        if seed is not None:
+            random.setstate(random_state)
 
         if 'cry' in self.file_schedule_dict:
             original_count = len(self.file_schedule_dict['cry'])

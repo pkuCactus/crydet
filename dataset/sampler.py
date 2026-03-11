@@ -61,10 +61,14 @@ class CrySampler(Sampler):
         return len(self.data_source)
 
     def set_epoch(self, epoch: int):
-        """Regenerate schedule for epoch > 0 (new random slicing + filtering)."""
+        """Regenerate schedule for epoch > 0 (new random slicing + filtering).
+
+        Uses epoch as seed to ensure all distributed ranks generate identical schedules.
+        """
         self.epoch = epoch
         if epoch > 0 and hasattr(self.data_source, 'generate_schedule'):
-            self.data_source.generate_schedule(shuffle=self.shuffle)
+            # Use epoch as seed to ensure consistency across all ranks in DDP
+            self.data_source.generate_schedule(shuffle=self.shuffle, seed=epoch)
 
 
 class SequentialCrySampler(Sampler):
@@ -162,7 +166,11 @@ class DistributedCrySampler(Sampler):
         return self.num_samples
 
     def set_epoch(self, epoch: int):
-        """Regenerate schedule for epoch > 0 (new random slicing + filtering)."""
+        """Regenerate schedule for epoch > 0 (new random slicing + filtering).
+
+        Uses epoch as seed to ensure all distributed ranks generate identical schedules.
+        """
         self.epoch = epoch
         if epoch > 0 and hasattr(self.data_source, 'generate_schedule'):
-            self.data_source.generate_schedule(shuffle=self.shuffle)
+            # Use epoch as seed to ensure consistency across all ranks in DDP
+            self.data_source.generate_schedule(shuffle=self.shuffle, seed=epoch)
