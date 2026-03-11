@@ -39,7 +39,6 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -255,8 +254,8 @@ class Trainer:
         dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
         return metrics_tensor.tolist()
 
-    def _train_epoch(self) -> Dict[str, float]:
-        """Train one epoch."""
+    def _train_epoch(self, log_interval: int = 10) -> Dict[str, float]:
+        """Train one epoch with periodic logging instead of tqdm."""
         self.model.train()
 
         if hasattr(self.train_loader.sampler, 'set_epoch'):
@@ -267,9 +266,14 @@ class Trainer:
         total = 0
         all_preds, all_targets = [], []
 
-        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}", disable=self.rank != 0)
+        num_batches = len(self.train_loader)
+        start_time = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
+        end_time = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
 
-        for features, targets in pbar:
+        if start_time:
+            start_time.record()
+
+        for batch_idx, (features, targets) in enumerate(self.train_loader):
             features = features.to(self.device)
             targets = targets.to(self.device)
 
@@ -284,13 +288,33 @@ class Trainer:
                 all_preds.extend(predicted.cpu().numpy())
                 all_targets.extend(targets.cpu().numpy())
 
-            if self.rank == 0:
-                pbar.set_postfix({'loss': f'{unscaled_loss:.4f}', 'acc': f'{100.*correct/total:.2f}%'})
+            # Log progress at intervals (only on rank 0)
+            if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
+                current_loss = total_loss / (batch_idx + 1)
+                current_acc = 100. * correct / total
 
-                if self.writer and self.global_step % self.train_cfg.log_interval == 0:
-                    self.writer.add_scalar('train/loss_step', unscaled_loss, self.global_step)
-                    self.writer.add_scalar('train/acc_step', correct/total, self.global_step)
-                    self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
+                # Calculate throughput
+                if start_time and end_time:
+                    end_time.record()
+                    torch.cuda.synchronize()
+                    elapsed_ms = start_time.elapsed_time(end_time)
+                    samples_per_sec = (batch_idx + 1) * self.train_cfg.batch_size / (elapsed_ms / 1000)
+                    throughput_info = f", {samples_per_sec:.1f} samples/s"
+                else:
+                    throughput_info = ""
+
+                self.logger.info(
+                    f"Epoch [{self.current_epoch}] "
+                    f"Batch [{batch_idx + 1}/{num_batches}] "
+                    f"Loss: {unscaled_loss:.4f} (avg: {current_loss:.4f}), "
+                    f"Acc: {current_acc:.2f}%{throughput_info}"
+                )
+
+            # TensorBoard logging
+            if self.writer and self.global_step % self.train_cfg.log_interval == 0:
+                self.writer.add_scalar('train/loss_step', unscaled_loss, self.global_step)
+                self.writer.add_scalar('train/acc_step', correct/total, self.global_step)
+                self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
 
             self.global_step += 1
 
@@ -342,8 +366,8 @@ class Trainer:
             return local_list
 
     @torch.no_grad()
-    def _validate(self) -> Dict[str, float]:
-        """Validate on validation set"""
+    def _validate(self, log_interval: int = 10) -> Dict[str, float]:
+        """Validate on validation set with periodic logging."""
         if self.val_loader is None:
             return {}
 
@@ -356,11 +380,9 @@ class Trainer:
         all_targets = []
         all_probs = []
 
-        for features, targets in tqdm(
-            self.val_loader,
-            desc="Validation",
-            disable=self.rank != 0
-        ):
+        num_batches = len(self.val_loader)
+
+        for batch_idx, (features, targets) in enumerate(self.val_loader):
             features = features.to(self.device)
             targets = targets.to(self.device)
 
@@ -377,6 +399,17 @@ class Trainer:
             all_preds.extend(predicted.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
+
+            # Log progress at intervals (only on rank 0)
+            if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
+                current_loss = total_loss / (batch_idx + 1)
+                current_acc = 100. * correct / total
+                self.logger.info(
+                    f"Validation "
+                    f"Batch [{batch_idx + 1}/{num_batches}] "
+                    f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), "
+                    f"Acc: {current_acc:.2f}%"
+                )
 
         # Aggregate metrics across all processes
         if self.is_distributed:
