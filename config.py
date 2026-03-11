@@ -91,6 +91,7 @@ class AugmentationConfig:
             'reverb': 'reverb_prob',
             'phaser': 'phaser_prob',
             'echo': 'echo_prob',
+            'noise': 'noise_prob',
             'gain': 'gain_prob',
         },
         repr=False,

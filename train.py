@@ -627,10 +627,8 @@ def main():
                 num_replicas=world_size,
                 rank=rank
             )
-            shuffle = False  # Sampler handles shuffling
         else:
             train_sampler = CrySampler(train_dataset, cry_rate=config.dataset.cry_rate)
-            shuffle = True
 
         train_loader = DataLoader(
             train_dataset,
@@ -642,11 +640,11 @@ def main():
         )
 
         if val_dataset:
-            val_sampler = CrySampler(val_dataset, cry_rate=config.dataset.cry_rate)
+            # Validation should use all samples without balanced sampling
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.training.batch_size,
-                sampler=val_sampler,
+                shuffle=False,
                 num_workers=config.training.num_workers,
                 pin_memory=config.training.pin_memory,
                 collate_fn=collate_fn
@@ -655,9 +653,12 @@ def main():
         # Create model
         if rank == 0:
             logger.info(f"Creating model: d_model={config.model.d_model}, n_layers={config.model.n_layers}")
+        # Calculate input feature dimension (with deltas if enabled)
+        in_channels = config.feature.n_mels * config.feature.num_channels
+
         model = create_model(
             config=config.model,
-            in_channels=config.feature.feature_dim,
+            in_channels=in_channels,
             num_classes=config.model.num_classes,
             use_spec_augment=config.training.use_spec_augment
         )

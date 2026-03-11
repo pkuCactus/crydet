@@ -26,7 +26,7 @@ class CrySampler(Sampler):
     """
 
     def __init__(self, data_source=None, cry_rate: float = 0.5, shuffle: bool = True):
-        super().__init__(data_source)
+        super().__init__()
         self.cry_rate = cry_rate
         self.data_source = data_source
         if shuffle and hasattr(self.data_source, 'shuffle'):
@@ -72,7 +72,7 @@ def _get_distributed_info(num_replicas: Optional[int], rank: Optional[int]) -> t
     )
 
 
-class DistributedCrySampler(torch.utils.data.Sampler):
+class DistributedCrySampler(Sampler):
     """
     Distributed sampler that balances cry/non-cry samples across multiple GPUs.
     Wraps the original CrySampler for distributed training.
@@ -110,8 +110,8 @@ class DistributedCrySampler(torch.utils.data.Sampler):
         ))
 
         # Divide by num_replicas and round up
-        self.num_samples = (total_samples + num_replicas - 1) // num_replicas
-        self.total_size = self.num_samples * num_replicas
+        self.num_samples = (total_samples + self.num_replicas - 1) // self.num_replicas
+        self.total_size = self.num_samples * self.num_replicas
 
         self._cry_sampler = CrySampler(data_source, cry_rate=cry_rate, shuffle=shuffle)
 
@@ -119,8 +119,13 @@ class DistributedCrySampler(torch.utils.data.Sampler):
         # Generate indices using the original CrySampler logic
         indices = list(self._cry_sampler)
 
-        # Add extra samples to make it evenly divisible
-        indices += indices[:(self.total_size - len(indices))]
+        # Pad or truncate to make it evenly divisible
+        if len(indices) < self.total_size:
+            # Add extra samples to make it evenly divisible
+            indices += indices[:(self.total_size - len(indices))]
+        elif len(indices) > self.total_size:
+            # Truncate if too many samples
+            indices = indices[:self.total_size]
         assert len(indices) == self.total_size
 
         # Subsample for this rank

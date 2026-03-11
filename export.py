@@ -364,8 +364,8 @@ def main():
     if args.size_report:
         export_size_report(args.checkpoint)
 
-    # Create example input
-    example_input = torch.randn(args.batch_size, config.feature.feature_dim, args.seq_len)
+    # Create example input - shape [B, T, F] (batch, time_frames, feature_dim)
+    example_input = torch.randn(args.batch_size, args.seq_len, config.feature.feature_dim)
     LOGGER.info(f"Example input shape: {example_input.shape}")
 
     # Generate output path

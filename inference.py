@@ -97,7 +97,7 @@ class CryDetector:
         """Extract features from waveform"""
         features = self.feature_extractor.extract_single(waveform, self.sample_rate)
         features = torch.from_numpy(features).float()
-        features = features.transpose(0, 1).unsqueeze(0)  # (1, C, T)
+        features = features.unsqueeze(0)  # (1, T, F) - model expects [B, T, F]
         return features.to(self.device)
 
     @torch.no_grad()

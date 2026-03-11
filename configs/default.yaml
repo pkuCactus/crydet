@@ -7,7 +7,7 @@ feature:
   n_mfcc: 40                   # Number of MFCC coefficients (used when feature_type='mfcc')
   n_mels: 64                   # Number of mel filters (used when feature_type='fbank')
   n_fft: 1024                  # FFT window size
-  hop_length: 512              # Hop length between frames
+  hop_length: 500             # Hop length between frames
   fmin: 250                    # Minimum frequency for mel filterbank
   fmax: 8000                   # Maximum frequency for mel filterbank
   normalize: true              # Normalize features

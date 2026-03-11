@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config
 from dataset.dataset import CryDataset
-from dataset.sampler import CrySampler
 from model import create_model
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -106,7 +105,7 @@ class Evaluator:
 
         return metrics, all_targets, all_preds, all_probs
 
-    def benchmark(self, input_shape: Tuple[int, int, int] = (1, 64, 157), num_runs: int = 100) -> Dict:
+    def benchmark(self, input_shape: Tuple[int, int, int] = (1, 157, 64), num_runs: int = 100) -> Dict:
         """Benchmark model inference speed"""
         dummy_input = torch.randn(input_shape).to(self.device)
 
@@ -190,11 +189,11 @@ def main():
         aug_config=None,
         feat_config=config.feature
     )
-    test_sampler = CrySampler(test_dataset, cry_rate=0.5)
+    # Evaluation should use all samples, not balanced sampling
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
-        sampler=test_sampler,
+        shuffle=False,
         num_workers=4,
         pin_memory=True,
         collate_fn=collate_fn

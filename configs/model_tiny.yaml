@@ -6,7 +6,7 @@ feature:
   feature_type: fbank
   n_mels: 32
   n_fft: 1024
-  hop_length: 512
+  hop_length: 500
   fmin: 250
   fmax: 8000
   preemphasis: 0.95
