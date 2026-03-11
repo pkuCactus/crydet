@@ -233,7 +233,7 @@ class Trainer:
 
             # Forward pass with mixed precision
             if self.scaler is not None:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast():
                     outputs = self.model(features)
                     loss = self.criterion(outputs, targets)
                     loss = loss / self.world_size  # Scale loss for gradient averaging
