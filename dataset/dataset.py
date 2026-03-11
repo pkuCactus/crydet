@@ -151,8 +151,14 @@ class CryDataset(Dataset):
             cry_count / self.config.cry_rate
         ))
 
-    def generate_schedule(self):
-        """Regenerate file schedules for the next epoch"""
+    def generate_schedule(self, shuffle: bool = False):
+        """
+        Regenerate file schedules for the next epoch.
+
+        Args:
+            shuffle: If True, shuffle the file schedules after generation.
+                    If False, keep the original append order.
+        """
         self.file_schedule_dict = self._get_schedule_dict(self.data_dict)
 
         # Filter low-energy cry samples (preprocessing)
@@ -166,6 +172,11 @@ class CryDataset(Dataset):
             if filtered_count < original_count:
                 LOGGER.info(f"Filtered {original_count - filtered_count} low-energy cry samples "
                            f"(threshold: {self.cry_min_energy_db} dB, remaining: {filtered_count})")
+
+        # Shuffle schedules if requested
+        if shuffle:
+            for label in self.file_schedule_dict:
+                random.shuffle(self.file_schedule_dict[label])
 
         self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
                               for _ in range(self.data_dict[label][0])]
@@ -213,11 +224,6 @@ class CryDataset(Dataset):
                 continue
 
         return valid_schedules
-
-    def shuffle(self):
-        """Shuffle file schedules for each label"""
-        for label in self.file_schedule_dict:
-            random.shuffle(self.file_schedule_dict[label])
 
     @property
     def other_labels(self) -> List[str]:

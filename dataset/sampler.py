@@ -29,6 +29,7 @@ class CrySampler(Sampler):
         super().__init__()
         self.cry_rate = cry_rate
         self.data_source = data_source
+        self.shuffle = shuffle
         if shuffle and hasattr(self.data_source, 'shuffle'):
             self.data_source.shuffle()
 
@@ -60,6 +61,22 @@ class CrySampler(Sampler):
     def num_samples(self):
         """Return the dataset length"""
         return len(self.data_source)
+
+    def set_epoch(self, epoch: int):
+        """
+        Set the epoch number and regenerate data schedules for subsequent epochs.
+
+        Epoch 0 uses the schedule generated in Dataset.__init__().
+        For epoch > 0, regenerates with new random slicing positions
+        and re-filters low-energy samples.
+
+        Args:
+            epoch: The current epoch number
+        """
+        self.epoch = epoch
+        # Skip epoch 0 (already generated in __init__), regenerate for later epochs
+        if epoch > 0 and hasattr(self.data_source, 'generate_schedule'):
+            self.data_source.generate_schedule(shuffle=self.shuffle)
 
 
 def _get_distributed_info(num_replicas: Optional[int], rank: Optional[int]) -> tuple[int, int]:
@@ -138,6 +155,17 @@ class DistributedCrySampler(Sampler):
         return self.num_samples
 
     def set_epoch(self, epoch: int):
+        """
+        Set the epoch number and regenerate data schedules for subsequent epochs.
+
+        Epoch 0 uses the schedule generated in Dataset.__init__().
+        For epoch > 0, regenerates with new random slicing positions
+        and re-filters low-energy samples.
+
+        Args:
+            epoch: The current epoch number
+        """
         self.epoch = epoch
-        if self.shuffle:
-            self.data_source.shuffle()
+        # Skip epoch 0 (already generated in __init__), regenerate for later epochs
+        if epoch > 0 and hasattr(self.data_source, 'generate_schedule'):
+            self.data_source.generate_schedule(shuffle=self.shuffle)

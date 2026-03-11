@@ -210,8 +210,8 @@ class Trainer:
         """Train one epoch"""
         self.model.train()
 
-        # Set epoch for distributed sampler
-        if self.is_distributed and hasattr(self.train_loader.sampler, 'set_epoch'):
+        # Set epoch for sampler to regenerate data schedules
+        if hasattr(self.train_loader.sampler, 'set_epoch'):
             self.train_loader.sampler.set_epoch(self.current_epoch)
 
         total_loss = 0.0
