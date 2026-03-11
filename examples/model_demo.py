@@ -67,8 +67,9 @@ def demo_inference(d_model=256, n_layers=6, n_heads=4):
     model = create_model(config=config, in_channels=64, num_classes=2)
     model.eval()
 
-    # Create dummy input (batch_size=4, channels=64, time_frames=157)
-    dummy_input = torch.randn(4, 64, 157)
+    # Create dummy input (batch_size=4, time_frames=157, feature_dim=64)
+    # Format: [B, T, F] where T=time frames, F=feature dimension (mel bins)
+    dummy_input = torch.randn(4, 157, 64)
     print(f"\nInput shape: {dummy_input.shape}")
 
     # Run inference
@@ -105,7 +106,8 @@ def demo_benchmark(d_model=256, n_layers=6, n_heads=4, num_runs=100):
     model.eval()
 
     # Create dummy input on device
-    dummy_input = torch.randn(1, 64, 157).to(device)
+    # Format: [B, T, F] where T=time frames, F=feature dimension
+    dummy_input = torch.randn(1, 157, 64).to(device)
 
     # Warmup
     print("Warming up...")

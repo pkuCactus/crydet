@@ -203,6 +203,74 @@ class FeatureExtractor:
 
         return fbank_norm
 
+    def _compute_delta(self, features: np.ndarray, axis: int = 0) -> np.ndarray:
+        """
+        Compute delta (differential) features using central difference.
+
+        Args:
+            features: Input features array
+            axis: Axis along which to compute delta (0=time, 1=frequency)
+
+        Returns:
+            Delta features with same shape as input
+        """
+        # Pad at boundaries
+        pad_width = [(0, 0)] * features.ndim
+        pad_width[axis] = (1, 1)
+        padded = np.pad(features, pad_width, mode='edge')
+
+        # Central difference: delta[t] = (feat[t+1] - feat[t-1]) / 2
+        delta = (np.take(padded, range(2, padded.shape[axis]), axis=axis) -
+                 np.take(padded, range(0, padded.shape[axis] - 2), axis=axis)) / 2.0
+
+        return delta
+
+    def extract_with_deltas(self, y: np.ndarray, sr: int) -> np.ndarray:
+        """
+        Extract FBank features with optional delta features.
+
+        Returns features in shape [T, F] format for transformer input:
+        - Base: [T, n_mels]
+        - +time delta: [T, n_mels * 2]
+        - +freq delta: [T, n_mels * 3]
+
+        Args:
+            y: Audio waveform
+            sr: Sample rate
+
+        Returns:
+            Feature array of shape [time_frames, feature_dim]
+        """
+        # Extract base FBank features
+        features = self.extract(y, sr)
+        fbank = features['fbank']  # Shape: [n_mels, frames]
+
+        # Transpose to [T, F] format
+        fbank = fbank.T  # Shape: [frames, n_mels]
+
+        # List to collect all feature components
+        feature_components = [fbank]
+
+        # Add time delta features if enabled
+        if self.config.use_delta:
+            # Compute delta along time axis (axis=0)
+            delta_t = self._compute_delta(fbank, axis=0)
+            feature_components.append(delta_t)
+
+        # Add frequency delta features if enabled
+        if self.config.use_freq_delta:
+            # Compute delta along frequency axis (axis=1)
+            delta_f = self._compute_delta(fbank, axis=1)
+            feature_components.append(delta_f)
+
+        # Concatenate all features along feature dimension
+        if len(feature_components) > 1:
+            combined = np.concatenate(feature_components, axis=1)
+        else:
+            combined = fbank
+
+        return combined
+
     def extract_single(self, y: np.ndarray, sr: int) -> np.ndarray:
         """
         Extract single feature type (configured in feature_type)
@@ -213,6 +281,7 @@ class FeatureExtractor:
 
         Returns:
             Feature array based on config.feature_type
+            For 'fbank', returns [T, F] format with optional deltas
         """
         features = self.extract(y, sr)
 
@@ -223,7 +292,8 @@ class FeatureExtractor:
         elif self.config.feature_type == 'db':
             return features['db']
         else:  # 'fbank' or 'all'
-            return features['fbank']
+            # Return with deltas in [T, F] format
+            return self.extract_with_deltas(y, sr)
 
     def __call__(self, y: np.ndarray, sr: int) -> Dict[str, np.ndarray]:
         """Alias for extract method"""

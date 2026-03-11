@@ -13,10 +13,17 @@ from .variants import (
     list_models, get_model_info, print_model_summary,
     MODEL_CONFIGS
 )
+from .loss import (
+    FocalLoss,
+    LabelSmoothingCrossEntropy,
+    CombinedLoss,
+    create_loss
+)
 
 __all__ = [
     'CryTransformer',
     'create_model', 'create_model_from_variant',
     'list_models', 'get_model_info', 'print_model_summary',
-    'MODEL_CONFIGS'
+    'MODEL_CONFIGS',
+    'FocalLoss', 'LabelSmoothingCrossEntropy', 'CombinedLoss', 'create_loss'
 ]

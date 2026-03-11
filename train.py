@@ -39,7 +39,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -48,9 +47,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config, ModelConfig, TrainingConfig
 from dataset.dataset import CryDataset
-from dataset.feature import FeatureExtractor
-from dataset.sampler import CrySampler
+from dataset.sampler import CrySampler, DistributedCrySampler
 from model import create_model, get_model_info, print_model_summary
+from model.loss import FocalLoss, LabelSmoothingCrossEntropy, CombinedLoss
 
 
 # Setup logging
@@ -64,163 +63,22 @@ def setup_logger(rank: int = 0):
     return logging.getLogger(__name__)
 
 
-class FocalLoss(nn.Module):
-    """Focal Loss for handling class imbalance"""
-
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = 'mean'):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_term = (1 - pt) ** self.gamma
-        loss = self.alpha * focal_term * ce_loss
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
-
-
-class LabelSmoothingCrossEntropy(nn.Module):
-    """Label Smoothing Cross Entropy Loss"""
-
-    def __init__(self, smoothing: float = 0.1, reduction: str = 'mean'):
-        super().__init__()
-        self.smoothing = smoothing
-        self.reduction = reduction
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        num_classes = inputs.size(-1)
-        log_probs = F.log_softmax(inputs, dim=-1)
-
-        targets_one_hot = F.one_hot(targets, num_classes).float()
-        targets_smooth = targets_one_hot * (1 - self.smoothing) + self.smoothing / num_classes
-
-        loss = -(targets_smooth * log_probs).sum(dim=-1)
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
-
-
-class CombinedLoss(nn.Module):
-    """Combined Focal Loss + Label Smoothing"""
-
-    def __init__(
-        self,
-        alpha: float = 0.25,
-        gamma: float = 2.0,
-        label_smoothing: float = 0.1,
-        focal_weight: float = 0.5
-    ):
-        super().__init__()
-        self.focal_loss = FocalLoss(alpha, gamma)
-        self.ce_loss = LabelSmoothingCrossEntropy(label_smoothing)
-        self.focal_weight = focal_weight
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        focal = self.focal_loss(inputs, targets)
-        ce = self.ce_loss(inputs, targets)
-        return self.focal_weight * focal + (1 - self.focal_weight) * ce
-
-
 def collate_fn(batch):
-    """Custom collate function for DataLoader"""
-    waveforms, labels = zip(*batch)
+    """
+    Custom collate function for DataLoader.
 
-    max_len = max(w.shape[0] for w in waveforms)
-    padded_waveforms = []
-    for w in waveforms:
-        if len(w) < max_len:
-            w = np.pad(w, (0, max_len - len(w)), mode='constant')
-        padded_waveforms.append(w)
+    Input: List of (features, label) tuples where features is [T, F] numpy array
+    Output: (features_tensor, label_indices) where features_tensor is [B, T, F]
+    """
+    features_list, labels = zip(*batch)
 
-    waveforms = torch.from_numpy(np.stack(padded_waveforms)).float()
+    # Stack features directly (they should all have same shape [T, F])
+    features = torch.from_numpy(np.stack(features_list)).float()  # [B, T, F]
 
     label_to_idx = {'cry': 1, 'other': 0}
     label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
 
-    return waveforms, label_indices
-
-
-class DistributedCrySampler(torch.utils.data.Sampler):
-    """
-    Distributed sampler that balances cry/non-cry samples across multiple GPUs.
-    Wraps the original CrySampler for distributed training.
-    """
-
-    def __init__(
-        self,
-        data_source,
-        cry_rate: float = 0.5,
-        num_replicas: Optional[int] = None,
-        rank: Optional[int] = None,
-        shuffle: bool = True,
-        seed: int = 0
-    ):
-        if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            num_replicas = dist.get_world_size()
-        if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            rank = dist.get_rank()
-
-        self.data_source = data_source
-        self.cry_rate = cry_rate
-        self.num_replicas = num_replicas
-        self.rank = rank
-        self.epoch = 0
-        self.shuffle = shuffle
-        self.seed = seed
-
-        # Calculate total samples per epoch
-        cry_count = len(data_source.file_schedule_dict.get('cry', []))
-        other_count = sum(
-            len(schedules)
-            for label, schedules in data_source.file_schedule_dict.items()
-            if label != 'cry'
-        )
-        total_samples = int(max(
-            other_count / (1 - cry_rate),
-            cry_count / cry_rate
-        ))
-
-        # Divide by num_replicas and round up
-        self.num_samples = (total_samples + num_replicas - 1) // num_replicas
-        self.total_size = self.num_samples * self.num_replicas
-
-        self._cry_sampler = CrySampler(data_source, cry_rate=cry_rate, shuffle=shuffle)
-
-    def __iter__(self):
-        # Generate indices using the original CrySampler logic
-        indices = list(self._cry_sampler)
-
-        # Add extra samples to make it evenly divisible
-        indices += indices[:(self.total_size - len(indices))]
-        assert len(indices) == self.total_size
-
-        # Subsample for this rank
-        indices = indices[self.rank:self.total_size:self.num_replicas]
-        assert len(indices) == self.num_samples
-
-        return iter(indices)
-
-    def __len__(self):
-        return self.num_samples
-
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
-        if self.shuffle:
-            self.data_source.shuffle()
+    return features, label_indices
 
 
 class Trainer:
@@ -272,9 +130,6 @@ class Trainer:
         # Optimizer (operates on unwrapped model parameters)
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
-
-        # Feature extractor
-        self.feature_extractor = FeatureExtractor(config.feature)
 
         # Training state
         self.current_epoch = 0
@@ -351,24 +206,6 @@ class Trainer:
             )
         return None
 
-    def _extract_features(self, waveforms: torch.Tensor) -> torch.Tensor:
-        """Extract features from waveforms"""
-        batch_size = waveforms.size(0)
-        features_list = []
-
-        for i in range(batch_size):
-            waveform = waveforms[i].cpu().numpy()
-            non_zero = np.where(np.abs(waveform) > 1e-8)[0]
-            if len(non_zero) > 0:
-                waveform = waveform[:non_zero[-1] + 1]
-
-            features = self.feature_extractor.extract_single(waveform, 16000)
-            features_list.append(torch.from_numpy(features).float())
-
-        features = torch.stack(features_list)
-        features = features.transpose(1, 2)
-        return features.to(self.device)
-
     def _train_epoch(self) -> Dict[str, float]:
         """Train one epoch"""
         self.model.train()
@@ -389,11 +226,10 @@ class Trainer:
             disable=self.rank != 0
         )
 
-        for batch_idx, (waveforms, targets) in enumerate(pbar):
-            waveforms = waveforms.to(self.device)
+        for batch_idx, (features, targets) in enumerate(pbar):
+            # Features are already in [B, T, F] format from dataset
+            features = features.to(self.device)
             targets = targets.to(self.device)
-
-            features = self._extract_features(waveforms)
 
             # Forward pass with mixed precision
             if self.scaler is not None:
@@ -498,15 +334,15 @@ class Trainer:
         all_targets = []
         all_probs = []
 
-        for waveforms, targets in tqdm(
+        for features, targets in tqdm(
             self.val_loader,
             desc="Validation",
             disable=self.rank != 0
         ):
-            waveforms = waveforms.to(self.device)
+            # Features are already in [B, T, F] format from dataset
+            features = features.to(self.device)
             targets = targets.to(self.device)
 
-            features = self._extract_features(waveforms)
             outputs = self.model(features)
             loss = self.criterion(outputs, targets)
 
@@ -765,7 +601,8 @@ def main():
         train_dataset = CryDataset(
             train_dict,
             config.dataset,
-            config.augmentation if config.training.use_augmentation else None
+            aug_config=config.augmentation if config.training.use_augmentation else None,
+            feat_config=config.feature
         )
 
         val_dataset = None
@@ -777,7 +614,8 @@ def main():
             val_dataset = CryDataset(
                 val_dict,
                 config.dataset,
-                None
+                aug_config=None,
+                feat_config=config.feature
             )
 
         # Create samplers and loaders

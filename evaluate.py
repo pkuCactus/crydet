@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config
 from dataset.dataset import CryDataset
-from dataset.feature import FeatureExtractor
 from dataset.sampler import CrySampler
 from model import create_model
 
@@ -37,20 +36,21 @@ LOGGER = logging.getLogger(__name__)
 
 
 def collate_fn(batch):
-    """Custom collate function"""
-    waveforms, labels = zip(*batch)
-    max_len = max(w.shape[0] for w in waveforms)
-    padded_waveforms = []
-    for w in waveforms:
-        if len(w) < max_len:
-            w = np.pad(w, (0, max_len - len(w)), mode='constant')
-        padded_waveforms.append(w)
+    """
+    Custom collate function for DataLoader.
 
-    waveforms = torch.from_numpy(np.stack(padded_waveforms)).float()
+    Input: List of (features, label) tuples where features is [T, F] numpy array
+    Output: (features_tensor, label_indices) where features_tensor is [B, T, F]
+    """
+    features_list, labels = zip(*batch)
+
+    # Stack features directly (they should all have same shape [T, F])
+    features = torch.from_numpy(np.stack(features_list)).float()  # [B, T, F]
+
     label_to_idx = {'cry': 1, 'other': 0}
     label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
 
-    return waveforms, label_indices
+    return features, label_indices
 
 
 class Evaluator:
@@ -61,24 +61,6 @@ class Evaluator:
         self.model.eval()
         self.config = config
         self.device = device
-        self.feature_extractor = FeatureExtractor(config.feature)
-
-    def _extract_features(self, waveforms: torch.Tensor) -> torch.Tensor:
-        """Extract features from waveforms"""
-        batch_size = waveforms.size(0)
-        features_list = []
-
-        for i in range(batch_size):
-            waveform = waveforms[i].cpu().numpy()
-            non_zero = np.where(np.abs(waveform) > 1e-8)[0]
-            if len(non_zero) > 0:
-                waveform = waveform[:non_zero[-1] + 1]
-            features = self.feature_extractor.extract_single(waveform, 16000)
-            features_list.append(torch.from_numpy(features).float())
-
-        features = torch.stack(features_list)
-        features = features.transpose(1, 2)
-        return features.to(self.device)
 
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader) -> Dict:
@@ -88,9 +70,9 @@ class Evaluator:
         all_probs = []
         inference_times = []
 
-        for waveforms, targets in tqdm(dataloader, desc="Evaluating"):
-            waveforms = waveforms.to(self.device)
-            features = self._extract_features(waveforms)
+        for features, targets in tqdm(dataloader, desc="Evaluating"):
+            # Features are already in [B, T, F] format from dataset
+            features = features.to(self.device)
 
             # Measure inference time
             start_time = time.time()
@@ -201,7 +183,13 @@ def main():
     with open(args.test_list, 'r') as f:
         test_dict = json.load(f)
 
-    test_dataset = CryDataset(test_dict, config.dataset, None)
+    # Create dataset with feature extraction
+    test_dataset = CryDataset(
+        test_dict,
+        config.dataset,
+        aug_config=None,
+        feat_config=config.feature
+    )
     test_sampler = CrySampler(test_dataset, cry_rate=0.5)
     test_loader = DataLoader(
         test_dataset,
@@ -212,10 +200,13 @@ def main():
         collate_fn=collate_fn
     )
 
+    # Calculate input feature dimension (with deltas)
+    in_channels = config.feature.n_mels * config.feature.num_channels
+
     # Create model
     model = create_model(
         config=config.model,
-        in_channels=config.feature.feature_dim,
+        in_channels=in_channels,
         num_classes=config.model.num_classes
     )
     model.load_state_dict(checkpoint['model_state_dict'])

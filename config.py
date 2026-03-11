@@ -203,10 +203,6 @@ class ModelConfig:
     dropout: float = 0.1
     attention_dropout: float = 0.1
 
-    # Patch embedding
-    patch_size: int = 3
-    patch_stride: int = 2
-
     # Positional encoding
     max_seq_len: int = 200
     use_relative_pos: bool = True
@@ -269,14 +265,15 @@ class ModelConfig:
     @property
     def estimated_params(self) -> int:
         """Estimate total parameter count"""
-        # Embedding + Transformer layers + Classifier
-        embedding_params = 64 * self.d_model * 9  # ~9 for typical conv kernel
+        # Linear projection + Transformer layers + Classifier
+        # Linear projection: in_features (64/128/192) -> d_model
+        projection_params = 64 * self.d_model + self.d_model  # weights + bias
         layer_params = self.n_layers * (
             4 * self.d_model * self.d_model +  # Q, K, V, O projections
             2 * self.d_model * self.d_ff       # FFN
         )
         classifier_params = self.d_model * self.num_classes
-        return embedding_params + layer_params + classifier_params
+        return projection_params + layer_params + classifier_params
 
     @property
     def size_category(self) -> str:
@@ -295,7 +292,6 @@ class ModelConfig:
     def large(cls) -> 'ModelConfig':
         """High-performance configuration for server/cloud deployment"""
         return cls(
-            variant='large',
             d_model=512,
             n_heads=8,
             n_layers=12,
@@ -309,7 +305,6 @@ class ModelConfig:
     def medium(cls) -> 'ModelConfig':
         """Lightweight configuration for edge devices (Raspberry Pi, Edge TPU)"""
         return cls(
-            variant='medium',
             d_model=256,
             n_heads=4,
             n_layers=6,
@@ -323,7 +318,6 @@ class ModelConfig:
     def tiny(cls) -> 'ModelConfig':
         """Ultra-lightweight configuration for MCU (Cortex-M, ESP32)"""
         return cls(
-            variant='tiny',
             d_model=128,
             n_heads=2,
             n_layers=3,
@@ -331,8 +325,6 @@ class ModelConfig:
             dropout=0.1,
             attention_type='depthwise',
             ffn_type='inverted_bottleneck',
-            patch_size=5,
-            patch_stride=3,
         )
 
 

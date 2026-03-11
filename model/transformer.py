@@ -15,7 +15,6 @@ import torch.nn.functional as F
 
 from config import ModelConfig
 from model.layers import (
-    PatchEmbedding,
     SinusoidalPositionalEncoding,
     TransformerEncoderLayer,
     PoolingLayer
@@ -27,7 +26,8 @@ class CryTransformer(nn.Module):
     Transformer-based audio classifier for baby cry detection.
 
     Architecture:
-        1. Patch Embedding: Conv1d projects mel-spectrogram to embeddings
+        1. Linear Projection: Projects FBank features to d_model dimension
+           Input: [B, T, F] where F = 64/128/192 (FBank with optional delta features)
         2. Positional Encoding: Sinusoidal or learned positional encoding
         3. Transformer Encoder: Stack of attention + FFN layers
         4. Pooling: Global average/max/attention pooling
@@ -36,6 +36,7 @@ class CryTransformer(nn.Module):
     Args:
         config: ModelConfig containing model hyperparameters
         in_channels: Number of input feature channels (e.g., 64 for mel bins)
+                     Can be 64 (base), 128 (with delta), or 192 (with freq_delta)
         num_classes: Number of output classes (default: 2 for cry/non-cry)
     """
 
@@ -50,14 +51,10 @@ class CryTransformer(nn.Module):
         self.in_channels = in_channels
         self.num_classes = num_classes
 
-        # Patch embedding: (B, C, T) -> (B, T', D)
-        self.patch_embed = PatchEmbedding(
-            in_channels=in_channels,
-            d_model=config.d_model,
-            patch_size=config.patch_size,
-            stride=config.patch_stride,
-            dropout=config.dropout
-        )
+        # Linear projection: (B, T, F) -> (B, T, D)
+        # Input is [B, T, F] where F can be 64, 128, or 192
+        self.input_projection = nn.Linear(in_channels, config.d_model)
+        self.input_dropout = nn.Dropout(config.dropout)
 
         # Positional encoding
         if config.use_relative_pos:
@@ -117,14 +114,15 @@ class CryTransformer(nn.Module):
         Extract features from input spectrogram.
 
         Args:
-            x: Input spectrogram of shape (B, C, T) where
-               B = batch size, C = mel bins (e.g., 64), T = time frames (e.g., 157)
+            x: Input spectrogram of shape (B, T, F) where
+               B = batch size, T = time frames (e.g., 157), F = feature dim (e.g., 64)
 
         Returns:
             Feature tensor of shape (B, d_model)
         """
-        # Patch embedding: (B, C, T) -> (B, T', D)
-        x = self.patch_embed(x)
+        # Linear projection: (B, T, F) -> (B, T, D)
+        x = self.input_projection(x)
+        x = self.input_dropout(x)
 
         # Add positional encoding (if not using relative positions)
         if self.pos_encoding is not None:
@@ -147,17 +145,13 @@ class CryTransformer(nn.Module):
         Forward pass.
 
         Args:
-            x: Input spectrogram of shape (B, C, T) or (B, T, C)
-               Will automatically handle channel-last inputs
+            x: Input spectrogram of shape (B, T, F) where
+               B = batch size, T = time frames (e.g., 157), F = feature dim (e.g., 64)
+               F can be 64 (base), 128 (with delta), or 192 (with freq_delta)
 
         Returns:
             Logits tensor of shape (B, num_classes)
         """
-        # Handle channel-last input (B, T, C) -> (B, C, T)
-        if x.dim() == 3 and x.size(1) > x.size(2):
-            # Likely (B, T, C) where T > C
-            x = x.transpose(1, 2)
-
         features = self.forward_features(x)
         logits = self.classifier(features)
         return logits
@@ -167,15 +161,15 @@ class CryTransformer(nn.Module):
         Extract attention maps from all layers for visualization.
 
         Args:
-            x: Input spectrogram
+            x: Input spectrogram of shape (B, T, F)
 
         Returns:
             List of attention weight tensors from each layer
         """
         attention_maps = []
 
-        # Patch embedding
-        x = self.patch_embed(x)
+        # Linear projection
+        x = self.input_projection(x)
         if self.pos_encoding is not None:
             x = self.pos_encoding(x)
 
@@ -205,25 +199,28 @@ class CryTransformer(nn.Module):
         total = sum(p.numel() for p in self.parameters())
         return trainable, total
 
-    def estimate_macs(self, input_shape: Tuple[int, ...] = (1, 64, 157)) -> int:
+    def estimate_macs(self, input_shape: Tuple[int, ...] = (1, 157, 64)) -> int:
         """
         Estimate MACs (multiply-accumulate operations) for a forward pass.
 
         Args:
-            input_shape: Input tensor shape (B, C, T)
+            input_shape: Input tensor shape (B, T, F)
+                             B = batch size
+                             T = time frames (e.g., 157)
+                             F = feature dim (e.g., 64)
 
         Returns:
             Estimated number of MACs
         """
         # This is a rough estimation
-        B, C, T = input_shape
+        B, T, F = input_shape
 
-        # Patch embedding
-        T_out = T // self.config.patch_stride
-        patch_macs = C * self.config.d_model * self.config.patch_size * T_out
+        # Linear projection: (B, T, F) -> (B, T, D)
+        # MACs = T * F * d_model
+        proj_macs = T * F * self.config.d_model
 
         # Self-attention per layer: O(n²·d) where n = seq_len, d = d_model
-        n = T_out
+        n = T  # seq_len = T (time frames)
         d = self.config.d_model
         attn_macs_per_layer = 2 * n * n * d  # Q@K.T and attn@V
 
@@ -234,7 +231,7 @@ class CryTransformer(nn.Module):
         layer_macs = attn_macs_per_layer + ffn_macs_per_layer
 
         # All layers + classifier
-        total_macs = patch_macs + self.config.n_layers * layer_macs + d * self.num_classes
+        total_macs = proj_macs + self.config.n_layers * layer_macs + d * self.num_classes
 
         return total_macs
 
@@ -263,7 +260,7 @@ class CryTransformerWithSpecAugment(CryTransformer):
         Apply SpecAugment to input spectrogram.
 
         Args:
-            x: Input spectrogram (B, C, T)
+            x: Input spectrogram (B, T, F) where F is feature dimension
 
         Returns:
             Augmented spectrogram
@@ -271,19 +268,19 @@ class CryTransformerWithSpecAugment(CryTransformer):
         if not self.training:
             return x
 
-        B, C, T = x.shape
+        B, T, F = x.shape
 
-        # Frequency masking
+        # Frequency masking (mask along feature dimension)
         for _ in range(self.num_freq_masks):
             f = torch.randint(0, self.freq_mask_param + 1, (1,)).item()
-            f0 = torch.randint(0, max(1, C - f), (1,)).item()
-            x[:, f0:f0+f, :] = 0
+            f0 = torch.randint(0, max(1, F - f), (1,)).item()
+            x[:, :, f0:f0+f] = 0
 
-        # Time masking
+        # Time masking (mask along time dimension)
         for _ in range(self.num_time_masks):
             t = torch.randint(0, self.time_mask_param + 1, (1,)).item()
             t0 = torch.randint(0, max(1, T - t), (1,)).item()
-            x[:, :, t0:t0+t] = 0
+            x[:, t0:t0+t, :] = 0
 
         return x
 

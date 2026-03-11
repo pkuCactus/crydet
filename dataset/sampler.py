@@ -1,23 +1,48 @@
 """
-Sampler for Cry Detection Dataset
+Dataset samplers for Cry Detection
+
+Provides balanced sampling between cry/non-cry samples.
 """
 
 import random
+from typing import Optional
+
+import torch
+import torch.distributed as dist
 from torch.utils.data import Sampler
 
 
 class CrySampler(Sampler):
-    def __init__(self, data_source = None, cry_rate: float = 0.5, shuffle: bool = True):
-        super().__init__()
+    """
+    Sampler that balances cry/non-cry samples.
+
+    Yields (label, file_idx) tuples with specified cry_rate probability.
+    Automatically cycles through samples when reaching the end.
+
+    Args:
+        data_source: CryDataset instance
+        cry_rate: Probability of sampling a cry sample (0-1)
+        shuffle: Whether to shuffle the dataset at initialization
+    """
+
+    def __init__(self, data_source=None, cry_rate: float = 0.5, shuffle: bool = True):
+        super().__init__(data_source)
         self.cry_rate = cry_rate
         self.data_source = data_source
-        if shuffle:
+        if shuffle and hasattr(self.data_source, 'shuffle'):
             self.data_source.shuffle()
 
     def __iter__(self):
+        """
+        Yield (label, file_idx) tuples.
+
+        Iterates through the dataset, yielding samples with the specified
+        cry_rate probability for cry samples.
+        """
         cry_idx = 0
         other_idx = {label: 0 for label in self.data_source.other_labels}
-        for i in range(len(self.data_source)):
+
+        for _ in range(len(self.data_source)):
             if random.random() < self.cry_rate:
                 label = 'cry'
                 yield (label, cry_idx)
@@ -28,8 +53,83 @@ class CrySampler(Sampler):
                 other_idx[label] = (other_idx[label] + 1) % self.data_source.num_samples[label]
 
     def __len__(self):
+        """Return the total number of samples per epoch"""
         return self.num_samples
 
     @property
     def num_samples(self):
+        """Return the dataset length"""
         return len(self.data_source)
+
+
+class DistributedCrySampler(torch.utils.data.Sampler):
+    """
+    Distributed sampler that balances cry/non-cry samples across multiple GPUs.
+    Wraps the original CrySampler for distributed training.
+    """
+
+    def __init__(
+        self,
+        data_source,
+        cry_rate: float = 0.5,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 0
+    ):
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            rank = dist.get_rank()
+
+        self.data_source = data_source
+        self.cry_rate = cry_rate
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.shuffle = shuffle
+        self.seed = seed
+
+        # Calculate total samples per epoch
+        cry_count = len(data_source.file_schedule_dict.get('cry', []))
+        other_count = sum(
+            len(schedules)
+            for label, schedules in data_source.file_schedule_dict.items()
+            if label != 'cry'
+        )
+        total_samples = int(max(
+            other_count / (1 - cry_rate),
+            cry_count / cry_rate
+        ))
+
+        # Divide by num_replicas and round up
+        self.num_samples = (total_samples + num_replicas - 1) // num_replicas
+        self.total_size = self.num_samples * self.num_replicas
+
+        self._cry_sampler = CrySampler(data_source, cry_rate=cry_rate, shuffle=shuffle)
+
+    def __iter__(self):
+        # Generate indices using the original CrySampler logic
+        indices = list(self._cry_sampler)
+
+        # Add extra samples to make it evenly divisible
+        indices += indices[:(self.total_size - len(indices))]
+        assert len(indices) == self.total_size
+
+        # Subsample for this rank
+        indices = indices[self.rank:self.total_size:self.num_replicas]
+        assert len(indices) == self.num_samples
+
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        if self.shuffle:
+            self.data_source.shuffle()

@@ -16,7 +16,8 @@ from torch.utils.data import Dataset
 
 from .audio_reader import AudioReader
 from .augmentation import AudioAugmenter
-from config import DatasetConfig, AugmentationConfig
+from .feature import FeatureExtractor
+from config import DatasetConfig, AugmentationConfig, FeatureConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
 # Default minimum energy threshold for cry samples (in dB, relative to max)
@@ -43,13 +44,18 @@ def compute_energy_db(waveform: np.ndarray) -> float:
 
 class CryDataset(Dataset):
     """
-    Dataset for baby cry detection with low-energy cry filtering
+    Dataset for baby cry detection with low-energy cry filtering and feature extraction
+
+    Returns pre-extracted features in [T, F] format for Transformer input:
+    - T: time frames (e.g., 157 for 5s audio)
+    - F: feature dimension (64/128/192 depending on delta configuration)
     """
     def __init__(
         self,
         data_dict: dict,
         config: DatasetConfig,
         aug_config: Optional[AugmentationConfig] = None,
+        feat_config: Optional[FeatureConfig] = None,
         cry_min_energy_db: float = -40.0,
     ):
         self.audio_reader = AudioReader(
@@ -60,6 +66,10 @@ class CryDataset(Dataset):
         self.config = config
         self.data_dict = data_dict
         self.cry_min_energy_db = cry_min_energy_db
+
+        # Initialize feature extractor
+        self.feat_config = feat_config or FeatureConfig()
+        self.feature_extractor = FeatureExtractor(self.feat_config)
 
         # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
@@ -90,7 +100,10 @@ class CryDataset(Dataset):
         if self.augmenter is not None:
             waveform = self.augmenter.augment(waveform, label)
 
-        return waveform, label
+        # Extract features in [T, F] format for Transformer
+        features = self.feature_extractor.extract_with_deltas(waveform, self.config.sample_rate)
+
+        return features, label
 
     def _pad_waveform(self, waveform: np.ndarray, target_length: int) -> np.ndarray:
         """

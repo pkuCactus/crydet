@@ -153,6 +153,61 @@ def compare_configs(audio_path: str, sample_rate: int = 16000):
     plt.close()
 
 
+def demo_delta_features(audio_path: str, sample_rate: int = 16000):
+    """
+    演示 Delta 特征提取 (用于Transformer模型输入)
+
+    Args:
+        audio_path: 音频文件路径
+        sample_rate: 采样率
+    """
+    print("\n" + "=" * 60)
+    print("Delta 特征提取演示 (Transformer输入格式)")
+    print("=" * 60)
+
+    # 读取音频
+    audio_reader = AudioReader(target_sr=sample_rate, force_mono=True)
+    waveform, sr = audio_reader.load(audio_path)
+
+    configs = [
+        ("Base FBank (64-dim)", FeatureConfig(n_mels=64, use_delta=False, use_freq_delta=False)),
+        ("+ Time Delta (128-dim)", FeatureConfig(n_mels=64, use_delta=True, use_freq_delta=False)),
+        ("+ Time + Freq Delta (192-dim)", FeatureConfig(n_mels=64, use_delta=True, use_freq_delta=True)),
+    ]
+
+    print(f"\n{'Configuration':<35} {'Shape':<15} {'Feature Dim'}")
+    print("-" * 65)
+
+    for name, cfg in configs:
+        extractor = FeatureExtractor(cfg)
+        features = extractor.extract_with_deltas(waveform, sr)
+        print(f"{name:<35} {str(features.shape):<15} {features.shape[1]}")
+
+    # 可视化
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    for i, (name, cfg) in enumerate(configs):
+        extractor = FeatureExtractor(cfg)
+        feats = extractor.extract_with_deltas(waveform, sr)
+
+        ax = axes[i]
+        im = ax.imshow(feats.T, aspect='auto', origin='lower', cmap='viridis')
+        ax.set_title(f'{name}\nShape: {feats.shape}')
+        ax.set_xlabel('Time Frames')
+        ax.set_ylabel('Feature Dim' if i == 0 else '')
+        plt.colorbar(im, ax=ax, shrink=0.8)
+
+    plt.tight_layout()
+    plt.savefig('feature_comparison.png', dpi=150, bbox_inches='tight')
+    print(f"\nDelta特征对比图已保存到: feature_comparison.png")
+    plt.close()
+
+    print("\n注意: Transformer模型期望输入格式为 [B, T, F]")
+    print("  - B: batch size")
+    print("  - T: 时间帧数 (如 157 对应5秒音频)")
+    print("  - F: 特征维度 (64/128/192)")
+
+
 def main():
     """主函数：演示特征提取流程"""
     print("=" * 70)
@@ -232,6 +287,9 @@ def main():
 
     # 比较不同配置
     compare_configs(audio_path)
+
+    # Delta特征演示
+    demo_delta_features(audio_path)
 
     # 清理测试文件
     if Path('_test_audio.wav').exists():

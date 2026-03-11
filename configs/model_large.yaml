@@ -60,10 +60,6 @@ model:
   dropout: 0.1
   attention_dropout: 0.1
 
-  # Patch embedding
-  patch_size: 3
-  patch_stride: 2
-
   # Positional encoding
   max_seq_len: 200
   use_relative_pos: true

@@ -19,8 +19,6 @@ MODEL_CONFIGS = {
         'attention_type': 'auto',  # Will be auto-selected
         'ffn_type': 'auto',
         'pool_type': 'mean',
-        'patch_size': 3,
-        'patch_stride': 2,
         'use_relative_pos': True,
     },
     'medium': {
@@ -31,8 +29,6 @@ MODEL_CONFIGS = {
         'attention_type': 'auto',
         'ffn_type': 'auto',
         'pool_type': 'mean',
-        'patch_size': 3,
-        'patch_stride': 2,
         'use_relative_pos': True,
     },
     'tiny': {
@@ -43,8 +39,6 @@ MODEL_CONFIGS = {
         'attention_type': 'auto',
         'ffn_type': 'auto',
         'pool_type': 'mean',
-        'patch_size': 5,
-        'patch_stride': 3,
         'use_relative_pos': False,
     },
     'nano': {
@@ -55,8 +49,6 @@ MODEL_CONFIGS = {
         'attention_type': 'auto',
         'ffn_type': 'auto',
         'pool_type': 'mean',
-        'patch_size': 5,
-        'patch_stride': 3,
         'use_relative_pos': False,
     }
 }
