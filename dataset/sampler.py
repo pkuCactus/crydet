@@ -62,6 +62,16 @@ class CrySampler(Sampler):
         return len(self.data_source)
 
 
+def _get_distributed_info(num_replicas: Optional[int], rank: Optional[int]) -> tuple[int, int]:
+    """Get distributed training info from environment or defaults."""
+    if not dist.is_available():
+        raise RuntimeError("Requires distributed package to be available")
+    return (
+        num_replicas if num_replicas is not None else dist.get_world_size(),
+        rank if rank is not None else dist.get_rank()
+    )
+
+
 class DistributedCrySampler(torch.utils.data.Sampler):
     """
     Distributed sampler that balances cry/non-cry samples across multiple GPUs.
@@ -77,14 +87,7 @@ class DistributedCrySampler(torch.utils.data.Sampler):
         shuffle: bool = True,
         seed: int = 0
     ):
-        if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            num_replicas = dist.get_world_size()
-        if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            rank = dist.get_rank()
+        num_replicas, rank = _get_distributed_info(num_replicas, rank)
 
         self.data_source = data_source
         self.cry_rate = cry_rate
@@ -108,7 +111,7 @@ class DistributedCrySampler(torch.utils.data.Sampler):
 
         # Divide by num_replicas and round up
         self.num_samples = (total_samples + num_replicas - 1) // num_replicas
-        self.total_size = self.num_samples * self.num_replicas
+        self.total_size = self.num_samples * num_replicas
 
         self._cry_sampler = CrySampler(data_source, cry_rate=cry_rate, shuffle=shuffle)
 

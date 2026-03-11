@@ -130,7 +130,19 @@ class CombinedLoss(nn.Module):
         return self.focal_weight * focal + (1 - self.focal_weight) * ce
 
 
-# Factory function to create loss from config
+_LOSS_CREATORS = {
+    'focal': lambda **kw: FocalLoss(alpha=kw['alpha'], gamma=kw['gamma']),
+    'label_smoothing': lambda **kw: LabelSmoothingCrossEntropy(smoothing=kw['label_smoothing']),
+    'combined': lambda **kw: CombinedLoss(
+        alpha=kw['alpha'],
+        gamma=kw['gamma'],
+        label_smoothing=kw['label_smoothing'],
+        focal_weight=kw['focal_weight']
+    ),
+    'cross_entropy': lambda **kw: nn.CrossEntropyLoss(label_smoothing=kw['label_smoothing']),
+}
+
+
 def create_loss(
     loss_type: str = 'combined',
     alpha: float = 0.25,
@@ -150,19 +162,12 @@ def create_loss(
 
     Returns:
         Loss module
+
+    Raises:
+        ValueError: If loss_type is not recognized
     """
-    if loss_type == 'focal':
-        return FocalLoss(alpha=alpha, gamma=gamma)
-    elif loss_type == 'label_smoothing':
-        return LabelSmoothingCrossEntropy(smoothing=label_smoothing)
-    elif loss_type == 'combined':
-        return CombinedLoss(
-            alpha=alpha,
-            gamma=gamma,
-            label_smoothing=label_smoothing,
-            focal_weight=focal_weight
-        )
-    elif loss_type == 'cross_entropy':
-        return nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    else:
+    if loss_type not in _LOSS_CREATORS:
         raise ValueError(f"Unknown loss type: {loss_type}")
+    return _LOSS_CREATORS[loss_type](
+        alpha=alpha, gamma=gamma, label_smoothing=label_smoothing, focal_weight=focal_weight
+    )
