@@ -36,7 +36,13 @@ def get_p(y: np.ndarray, y_ref: np.ndarray, ratio: float = 0.5, eps: float = 1e-
     return 1 / (1 + scale * scale_r)
 
 
-def pad_pcm(y: np.ndarray, target_length: int, pad_silence_prob: float = 0.5, pad_front_prob: float = 0.5) -> np.ndarray:
+def pad_pcm(
+    y: np.ndarray,
+    target_length: int,
+    pad_silence_prob: float = 0.5,
+    pad_front_prob: float = 0.5,
+    truncate: bool = True
+) -> np.ndarray:
     """
     Pad or truncate PCM audio to target length
 
@@ -45,13 +51,15 @@ def pad_pcm(y: np.ndarray, target_length: int, pad_silence_prob: float = 0.5, pa
         target_length: Desired length in samples
         pad_silence_prob: Probability of padding with silence (default: 0.5)
         pad_front_prob: Probability of padding at the front (default: 0.5)
+        truncate: If True, truncate when y is longer than target_length.
+                 If False, return y as-is when pad_length <= 0.
 
     Returns:
         Padded or truncated audio signal
     """
     pad_length = target_length - len(y)
     if pad_length <= 0:
-        return y[:target_length]
+        return y[:target_length] if truncate else y
     if random.random() < pad_silence_prob:
         padding = np.zeros(pad_length, dtype=y.dtype)
     else:

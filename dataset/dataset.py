@@ -17,6 +17,7 @@ from torch.utils.data import Dataset
 from .audio_reader import AudioReader
 from .augmentation import AudioAugmenter
 from .feature import FeatureExtractor
+from .utils import pad_pcm
 from config import DatasetConfig, AugmentationConfig, FeatureConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
@@ -94,7 +95,7 @@ class CryDataset(Dataset):
         # 如果需要补全
         if need_pad:
             target_samples = int(self.config.slice_len * self.config.sample_rate)
-            waveform = self._pad_waveform(waveform, target_samples)
+            waveform = pad_pcm(waveform, target_samples, pad_silence_prob=0.5, pad_front_prob=0.5, truncate=False)
 
         # Apply augmentation if enabled (all logic encapsulated in augmenter)
         if self.augmenter is not None:
@@ -104,38 +105,6 @@ class CryDataset(Dataset):
         features = self.feature_extractor.extract_with_deltas(waveform, self.config.sample_rate)
 
         return features, label
-
-    def _pad_waveform(self, waveform: np.ndarray, target_length: int) -> np.ndarray:
-        """
-        补全波形到目标长度 (随机补零或噪声)
-
-        Args:
-            waveform: 原始波形
-            target_length: 目标长度(采样点数)
-
-        Returns:
-            补全后的波形
-        """
-        current_length = len(waveform)
-        pad_length = target_length - current_length
-
-        if pad_length <= 0:
-            return waveform
-
-        # 随机选择补零或补噪声
-        if random.random() < 0.5:
-            padding = np.zeros(pad_length, dtype=np.float32)
-        else:
-            noise_level = 0.01 * np.std(waveform) if np.std(waveform) > 0 else 0.001
-            padding = np.random.randn(pad_length).astype(np.float32) * noise_level
-
-        # 随机选择补在前面还是后面
-        if random.random() < 0.5:
-            waveform = np.concatenate([padding, waveform])
-        else:
-            waveform = np.concatenate([waveform, padding])
-
-        return waveform
 
     def __len__(self) -> int:
         """Return the total number of samples per epoch based on cry rate"""
@@ -152,16 +121,9 @@ class CryDataset(Dataset):
         ))
 
     def generate_schedule(self, shuffle: bool = False):
-        """
-        Regenerate file schedules for the next epoch.
-
-        Args:
-            shuffle: If True, shuffle the file schedules after generation.
-                    If False, keep the original append order.
-        """
+        """Regenerate file schedules with new random slicing and energy filtering."""
         self.file_schedule_dict = self._get_schedule_dict(self.data_dict)
 
-        # Filter low-energy cry samples (preprocessing)
         if 'cry' in self.file_schedule_dict:
             original_count = len(self.file_schedule_dict['cry'])
             self.file_schedule_dict['cry'] = self._filter_low_energy_samples(
@@ -173,15 +135,14 @@ class CryDataset(Dataset):
                 LOGGER.info(f"Filtered {original_count - filtered_count} low-energy cry samples "
                            f"(threshold: {self.cry_min_energy_db} dB, remaining: {filtered_count})")
 
-        # Shuffle schedules if requested
         if shuffle:
-            for label in self.file_schedule_dict:
-                random.shuffle(self.file_schedule_dict[label])
+            for schedules in self.file_schedule_dict.values():
+                random.shuffle(schedules)
 
-        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry' \
+        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry'
                               for _ in range(self.data_dict[label][0])]
-        self._num_samples = {label: len(schedules) for label, schedules in self.file_schedule_dict.items()}
-        # Sync with augmenter
+        self._num_samples = {label: len(s) for label, s in self.file_schedule_dict.items()}
+
         if self.augmenter is not None:
             self.augmenter.file_schedule_dict = self.file_schedule_dict
 

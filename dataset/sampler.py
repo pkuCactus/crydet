@@ -30,8 +30,6 @@ class CrySampler(Sampler):
         self.cry_rate = cry_rate
         self.data_source = data_source
         self.shuffle = shuffle
-        if shuffle and hasattr(self.data_source, 'shuffle'):
-            self.data_source.shuffle()
 
     def __iter__(self):
         """
@@ -63,48 +61,28 @@ class CrySampler(Sampler):
         return len(self.data_source)
 
     def set_epoch(self, epoch: int):
-        """
-        Set the epoch number and regenerate data schedules for subsequent epochs.
-
-        Epoch 0 uses the schedule generated in Dataset.__init__().
-        For epoch > 0, regenerates with new random slicing positions
-        and re-filters low-energy samples.
-
-        Args:
-            epoch: The current epoch number
-        """
+        """Regenerate schedule for epoch > 0 (new random slicing + filtering)."""
         self.epoch = epoch
-        # Skip epoch 0 (already generated in __init__), regenerate for later epochs
         if epoch > 0 and hasattr(self.data_source, 'generate_schedule'):
             self.data_source.generate_schedule(shuffle=self.shuffle)
 
 
 class SequentialCrySampler(Sampler):
-    """
-    Sequential sampler for validation that iterates through all samples.
-
-    Unlike CrySampler, this sampler does not balance cry/non-cry samples.
-    It simply iterates through all available samples in order.
-
-    Yields (label, file_idx) tuples for all samples in the dataset.
-    """
+    """Sequential sampler for validation - iterates through all samples without balancing."""
 
     def __init__(self, data_source=None):
         super().__init__()
         self.data_source = data_source
 
     def __iter__(self):
-        """Yield (label, file_idx) tuples for all samples sequentially."""
-        for label in self.data_source.file_schedule_dict:
-            for idx in range(len(self.data_source.file_schedule_dict[label])):
+        for label, schedules in self.data_source.file_schedule_dict.items():
+            for idx in range(len(schedules)):
                 yield (label, idx)
 
     def __len__(self):
-        """Return total number of samples"""
-        return sum(len(schedules) for schedules in self.data_source.file_schedule_dict.values())
+        return sum(len(s) for s in self.data_source.file_schedule_dict.values())
 
     def set_epoch(self, epoch: int):
-        """No-op for sequential sampler - validation doesn't need regeneration."""
         pass
 
 
@@ -184,17 +162,7 @@ class DistributedCrySampler(Sampler):
         return self.num_samples
 
     def set_epoch(self, epoch: int):
-        """
-        Set the epoch number and regenerate data schedules for subsequent epochs.
-
-        Epoch 0 uses the schedule generated in Dataset.__init__().
-        For epoch > 0, regenerates with new random slicing positions
-        and re-filters low-energy samples.
-
-        Args:
-            epoch: The current epoch number
-        """
+        """Regenerate schedule for epoch > 0 (new random slicing + filtering)."""
         self.epoch = epoch
-        # Skip epoch 0 (already generated in __init__), regenerate for later epochs
         if epoch > 0 and hasattr(self.data_source, 'generate_schedule'):
             self.data_source.generate_schedule(shuffle=self.shuffle)

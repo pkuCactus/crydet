@@ -26,7 +26,6 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -206,103 +205,89 @@ class Trainer:
             )
         return None
 
+    def _forward_backward_step(self, features: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Execute forward and backward pass with optional mixed precision."""
+        self.optimizer.zero_grad()
+
+        if self.scaler is not None:
+            with torch.amp.autocast(device_type='cuda'):
+                outputs = self.model(features)
+                loss = self.criterion(outputs, targets) / self.world_size
+            self.scaler.scale(loss).backward()
+
+            if self.is_distributed or self.train_cfg.grad_clip is not None:
+                self.scaler.unscale_(self.optimizer)
+
+            if self.train_cfg.grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), self.train_cfg.grad_clip)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            outputs = self.model(features)
+            loss = self.criterion(outputs, targets) / self.world_size
+            loss.backward()
+
+            if self.train_cfg.grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), self.train_cfg.grad_clip)
+
+            self.optimizer.step()
+
+        return outputs, loss
+
+    def _aggregate_metrics(self, total_loss: float, correct: int, total: int) -> tuple[float, float, float]:
+        """Aggregate metrics across distributed processes."""
+        if not self.is_distributed:
+            return total_loss, float(correct), float(total)
+
+        metrics_tensor = torch.tensor([total_loss, correct, total], device=self.device)
+        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+        return metrics_tensor.tolist()
+
     def _train_epoch(self) -> Dict[str, float]:
-        """Train one epoch"""
+        """Train one epoch."""
         self.model.train()
 
-        # Set epoch for sampler to regenerate data schedules
         if hasattr(self.train_loader.sampler, 'set_epoch'):
             self.train_loader.sampler.set_epoch(self.current_epoch)
 
         total_loss = 0.0
         correct = 0
         total = 0
-        all_preds = []
-        all_targets = []
+        all_preds, all_targets = [], []
 
-        pbar = tqdm(
-            self.train_loader,
-            desc=f"Epoch {self.current_epoch}",
-            disable=self.rank != 0
-        )
+        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}", disable=self.rank != 0)
 
-        for _, (features, targets) in enumerate(pbar):
-            # Features are already in [B, T, F] format from dataset
+        for features, targets in pbar:
             features = features.to(self.device)
             targets = targets.to(self.device)
 
-            # Forward pass with mixed precision
-            if self.scaler is not None:
-                with torch.amp.autocast(device_type='cuda'):
-                    outputs = self.model(features)
-                    loss = self.criterion(outputs, targets)
-                    loss = loss / self.world_size  # Scale loss for gradient averaging
-            else:
-                outputs = self.model(features)
-                loss = self.criterion(outputs, targets)
-                loss = loss / self.world_size
+            outputs, loss = self._forward_backward_step(features, targets)
 
-            # Backward pass
-            self.optimizer.zero_grad()
-            if self.scaler is not None:
-                self.scaler.scale(loss).backward()
-
-                # Gradient synchronization for DDP
-                if self.is_distributed:
-                    self.scaler.unscale_(self.optimizer)
-
-                if self.train_cfg.grad_clip is not None:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.raw_model.parameters(),
-                        self.train_cfg.grad_clip
-                    )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-
-                if self.train_cfg.grad_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.raw_model.parameters(),
-                        self.train_cfg.grad_clip
-                    )
-                self.optimizer.step()
-
-            # Statistics (use unscaled loss for logging)
             with torch.no_grad():
                 unscaled_loss = loss.item() * self.world_size
                 total_loss += unscaled_loss
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
-
                 all_preds.extend(predicted.cpu().numpy())
                 all_targets.extend(targets.cpu().numpy())
 
             if self.rank == 0:
-                pbar.set_postfix({
-                    'loss': f'{unscaled_loss:.4f}',
-                    'acc': f'{100.*correct/total:.2f}%'
-                })
+                pbar.set_postfix({'loss': f'{unscaled_loss:.4f}', 'acc': f'{100.*correct/total:.2f}%'})
 
-                if self.global_step % self.train_cfg.log_interval == 0 and self.writer:
+                if self.writer and self.global_step % self.train_cfg.log_interval == 0:
                     self.writer.add_scalar('train/loss_step', unscaled_loss, self.global_step)
                     self.writer.add_scalar('train/acc_step', correct/total, self.global_step)
                     self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
 
             self.global_step += 1
 
-        # Aggregate metrics across all processes
-        if self.is_distributed:
-            metrics_tensor = torch.tensor([total_loss, correct, total], device=self.device)
-            dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
-            total_loss, correct, total = metrics_tensor.tolist()
+        total_loss, correct, total = self._aggregate_metrics(total_loss, correct, total)
 
         epoch_loss = total_loss / len(self.train_loader)
         epoch_acc = correct / total
 
-        # Calculate F1 score (only on rank 0 to avoid redundant computation)
         if self.rank == 0:
             from sklearn.metrics import f1_score, precision_score, recall_score
             f1 = f1_score(all_targets, all_preds, average='macro')
@@ -311,13 +296,7 @@ class Trainer:
         else:
             f1 = precision = recall = 0.0
 
-        return {
-            'loss': epoch_loss,
-            'accuracy': epoch_acc,
-            'f1': f1,
-            'precision': precision,
-            'recall': recall
-        }
+        return {'loss': epoch_loss, 'accuracy': epoch_acc, 'f1': f1, 'precision': precision, 'recall': recall}
 
     @torch.no_grad()
     def _validate(self) -> Dict[str, float]:

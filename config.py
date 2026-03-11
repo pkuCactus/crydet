@@ -4,7 +4,7 @@ Defines configuration dataclasses for feature extraction, model, and training
 """
 
 from dataclasses import dataclass, field, asdict, fields, MISSING
-from typing import Optional, Dict, Any, Type, TypeVar, get_origin, get_args
+from typing import Optional, Dict, Any, Type, TypeVar, ClassVar, get_origin, get_args
 from pathlib import Path
 import yaml
 
@@ -85,24 +85,20 @@ class AugmentationConfig:
     noise_prob: float = 0.1
     gain_prob: float = 0.9
 
-    _key_map: Dict[str, str] = field(
-        default_factory=lambda: {
-            'pitch': 'pitch_prob',
-            'reverb': 'reverb_prob',
-            'phaser': 'phaser_prob',
-            'echo': 'echo_prob',
-            'noise': 'noise_prob',
-            'gain': 'gain_prob',
-        },
-        repr=False,
-        compare=False
-    )
+    _EFFECT_MAP: ClassVar[Dict[str, str]] = {
+        'pitch': 'pitch_prob',
+        'reverb': 'reverb_prob',
+        'phaser': 'phaser_prob',
+        'echo': 'echo_prob',
+        'noise': 'noise_prob',
+        'gain': 'gain_prob',
+    }
 
     def __getitem__(self, key: str) -> float:
         """Support indexing access for effect probabilities."""
-        key = self._key_map.get(key, key)
-        if hasattr(self, key):
-            return getattr(self, key)
+        attr = self._EFFECT_MAP.get(key, key)
+        if hasattr(self, attr):
+            return getattr(self, attr)
         raise KeyError(f"Unknown key: {key}")
 
 
@@ -400,33 +396,21 @@ def load_config(config_path: str) -> Config:
     return from_dict(Config, yaml_config)
 
 
-def save_config(config: Config, save_path: str) -> None:
-    """
-    Save configuration to YAML file.
+def _as_dict(obj: Any) -> Any:
+    """Convert dataclass to dict, handling special types like tuples."""
+    if hasattr(obj, '__dataclass_fields__'):
+        return {k: _as_dict(v) for k, v in asdict(obj).items() if not k.startswith('_')}
+    if isinstance(obj, tuple):
+        return list(obj)
+    return obj
 
-    Args:
-        config: Config object to save
-        save_path: Path to save YAML file
-    """
+
+def save_config(config: Config, save_path: str) -> None:
+    """Save configuration to YAML file."""
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config_dict = {
-        'feature': asdict(config.feature),
-        'dataset': {
-            'audio_suffixes': list(config.dataset.audio_suffixes),
-            'sample_rate': config.dataset.sample_rate,
-            'slice_len': config.dataset.slice_len,
-            'stride': config.dataset.stride,
-            'cry_rate': config.dataset.cry_rate,
-            'cache_dir': config.dataset.cache_dir,
-            'force_mono': config.dataset.force_mono,
-        },
-        'augmentation': asdict(config.augmentation),
-        'model': asdict(config.model),
-        'training': asdict(config.training),
-    }
-
+    config_dict = _as_dict(config)
     with open(save_path, 'w', encoding='utf-8') as f:
         yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
