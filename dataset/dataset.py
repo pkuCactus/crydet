@@ -234,6 +234,7 @@ class CryDataset(Dataset):
                 LOGGER.warning(f"Cache load failed: {e}, rescanning...")
 
         # Collect all audio files first
+        LOGGER.info(f"Scanning {data_dir} for audio files...")
         audio_files = []
         for root, _, files in os.walk(data_dir):
             for file in sorted(files):
@@ -241,8 +242,12 @@ class CryDataset(Dataset):
                     continue
                 audio_files.append(os.path.join(root, file))
 
+        LOGGER.info(f"Found {len(audio_files)} audio files, reading metadata...")
+
         # Parallel processing for faster metadata reading
         file_infos = self._parallel_get_durations(audio_files)
+
+        LOGGER.info(f"Successfully loaded {len(file_infos)}/{len(audio_files)} file infos")
 
         # Save to cache with pickle (faster than JSON)
         if self.config.cache_dir:
