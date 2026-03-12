@@ -348,11 +348,14 @@ class Trainer:
         if self.is_distributed:
             # Gather num_batches from all ranks for correct loss averaging
             local_batches = len(self.val_loader)
-            batches_tensor = torch.tensor([local_batches], device=self.device)
+            batches_tensor = torch.tensor([local_batches], dtype=torch.long, device=self.device)
             dist.all_reduce(batches_tensor, op=dist.ReduceOp.SUM)
             total_batches = int(batches_tensor.item())
 
-            metrics = torch.tensor([total_loss, correct, total], device=self.device)
+            # Create tensor on CPU then move to device to avoid NCCL issue
+            metrics = torch.tensor([total_loss, correct, total])
+            if self.device.type == 'cuda':
+                metrics = metrics.cuda(self.device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             total_loss, correct, total = metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 

@@ -107,9 +107,10 @@ def _sync_schedule_from_rank0(dataset, shuffle: bool, seed: int) -> None:
     else:
         schedule = None
 
-    # Broadcast to all ranks
+    # Broadcast to all ranks (use current device)
     objects = [schedule]
-    dist.broadcast_object_list(objects, src=0)
+    current_device = torch.device(f'cuda:{rank}') if torch.cuda.is_available() else torch.device('cpu')
+    dist.broadcast_object_list(objects, src=0, device=current_device)
 
     # Non-rank-0: set the broadcasted schedule
     if rank != 0:
