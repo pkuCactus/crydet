@@ -97,20 +97,24 @@ DataLoader → Model
    - Scans directories → builds `file_schedule_dict[label]`
    - Each entry: `(file_path, start_time, duration, need_pad)`
    - Filters low-energy cry samples (< cry_min_energy_db)
-   - `generate_schedule(shuffle)` regenerates schedules with new random slicing positions
+   - `build_schedule(shuffle, seed)` regenerates schedules with new random slicing positions
+   - `label_schedule_count` property provides per-label schedule counts
 
 3. **CrySampler** (`dataset/sampler.py`):
    - Balances cry/non-cry sampling based on `cry_rate`
    - Yields `(label, file_idx)` tuples
-   - Automatically cycles through samples
-   - `set_epoch(epoch)` regenerates schedule for epoch > 0 (new random slicing + filtering)
+   - Calls `data_source.build_schedule(shuffle)` on each epoch start
+   - Uses `label_schedule_count` for cycling through samples
 
-   **DistributedCrySampler**: Distributed version for DDP training
-   - Wraps CrySampler for multi-GPU distributed training
-   - Handles data partitioning across replicas
+   **DistributedCrySampler**: Distributed sampler for DDP training
+   - Directly partitions `file_schedule_dict` across ranks (no wrapping)
+   - Each rank gets equal cry/non-cry partition with `cry_rate` sampling
+   - Ensures all ranks have identical batch counts (no sync needed)
+   - `set_epoch(epoch)` rebuilds partition with optional shuffling
 
    **SequentialCrySampler**: Sequential sampler for validation
    - Iterates through all samples without balancing
+   - Calls `data_source.build_schedule()` on initialization
    - Used by validation DataLoader
 
 4. **Dataset.__getitem__**:
@@ -133,7 +137,9 @@ DataLoader → Model
 | Component | Key Structure | Description |
 |-----------|---------------|-------------|
 | `file_schedule_dict` | `{label: [(path, start, dur, pad), ...]}` | All audio segments per label |
+| `label_schedule_count` | `{label: count}` | Number of schedules per label |
 | `CrySampler` | yields `(label, idx)` | Balanced sampling indices (training) |
+| `DistributedCrySampler` | yields `(label, idx)` | Partitioned sampling for DDP |
 | `SequentialCrySampler` | yields `(label, idx)` | Sequential sampling (validation) |
 | `Dataset.__getitem__` | returns `(features, label)` | `features` shape: `[T, F]` |
 | `collate_fn` | returns `(batch_features, batch_labels)` | `batch_features` shape: `[B, T, F]` |
@@ -189,6 +195,7 @@ python train.py --config configs/model_medium.yaml --train_list audio_list/train
 
 **Key Training Features:**
 - DDP (DistributedDataParallel) multi-GPU support
+- DistributedCrySampler ensures all ranks have identical batch counts
 - Automatic mixed precision (AMP)
 - SpecAugment for spectrogram augmentation
 - Label smoothing and Focal Loss
@@ -219,3 +226,5 @@ pip install -r requirements.txt
 - File info cache uses pickle (not JSON) for faster serialization
 - Librosa resampling (faster than scipy.signal.resample)
 - DDP with DistributedCrySampler for multi-GPU training
+- DistributedCrySampler partitions data directly without inter-rank synchronization
+- DataLoader `persistent_workers=False` to avoid DDP deadlocks
