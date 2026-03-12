@@ -106,7 +106,7 @@ class DistributedCrySampler(Sampler):
         self.epoch = 0
         self.shuffle = shuffle
         self.seed = seed
-        self.num_samples = len(self.data_source) // self.num_replicas
+        self.num_samples = 0
 
     def _build_partition(self):
         """Build cry and non-cry partitions for this rank."""

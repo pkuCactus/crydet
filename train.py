@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -34,13 +35,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from sklearn.metrics import f1_score, precision_score, recall_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config, ModelConfig, TrainingConfig
@@ -50,7 +51,6 @@ from model import create_model, get_model_info, print_model_summary
 from model.loss import FocalLoss, LabelSmoothingCrossEntropy, CombinedLoss
 
 
-# Setup logging
 def setup_logger(rank: int = 0):
     """Setup logger with rank info for distributed training"""
     logging.basicConfig(
@@ -62,17 +62,10 @@ def setup_logger(rank: int = 0):
 
 
 def collate_fn(batch):
-    """
-    Custom collate function for DataLoader.
-
-    Input: List of (features, label) tuples where features is [T, F] numpy array
-    Output: (features_tensor, label_indices) where features_tensor is [B, T, F]
-    """
+    """Stack features to [B, T, F] and convert labels to indices."""
     features_list, labels = zip(*batch)
 
-    # Stack features directly (they should all have same shape [T, F])
-    features = torch.from_numpy(np.stack(features_list)).float()  # [B, T, F]
-
+    features = torch.from_numpy(np.stack(features_list)).float()
     label_to_idx = {'cry': 1, 'other': 0}
     label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
 
@@ -81,13 +74,9 @@ def collate_fn(batch):
 
 def worker_init_fn(worker_id: int):
     """Initialize worker with unique seed for reproducibility."""
-    # Get base seed from torch
-    base_seed = torch.initial_seed()
-    # Create unique seed for this worker
-    worker_seed = base_seed + worker_id
-    np.random.seed(worker_seed % (2**32))
-    import random
-    random.seed(worker_seed % (2**32))
+    worker_seed = (torch.initial_seed() + worker_id) % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 class Trainer:
@@ -111,30 +100,15 @@ class Trainer:
         self.world_size = world_size
         self.is_distributed = world_size > 1
 
-        # Wrap model with DDP if distributed
-        if self.is_distributed:
-            self.model = DDP(model.to(device), device_ids=[rank], output_device=rank)
-            self.raw_model = model  # Keep reference to unwrapped model for saving
-        else:
-            self.model = model.to(device)
-            self.raw_model = model
+        model = model.to(device)
+        self.raw_model = model
+        self.model = DDP(model, device_ids=[rank], output_device=rank) if self.is_distributed else model
 
         # Training config
         self.train_cfg = config.training
         self.model_cfg = config.model
 
-        # Loss function
-        if self.train_cfg.use_focal_loss:
-            self.criterion = CombinedLoss(
-                alpha=self.train_cfg.focal_alpha,
-                gamma=self.train_cfg.focal_gamma,
-                label_smoothing=self.model_cfg.label_smoothing,
-                focal_weight=0.5
-            )
-        else:
-            self.criterion = nn.CrossEntropyLoss(label_smoothing=self.model_cfg.label_smoothing)
-
-        self.criterion = self.criterion.to(device)
+        self.criterion = self._create_loss().to(device)
 
         # Optimizer (operates on unwrapped model parameters)
         self.optimizer = self._create_optimizer()
@@ -163,57 +137,48 @@ class Trainer:
 
         self.logger = setup_logger(rank)
 
-    def _create_optimizer(self) -> torch.optim.Optimizer:
-        """Create optimizer"""
-        params = self.raw_model.parameters()
+    def _create_loss(self) -> nn.Module:
+        """Create loss function."""
+        if self.train_cfg.use_focal_loss:
+            return CombinedLoss(
+                alpha=self.train_cfg.focal_alpha,
+                gamma=self.train_cfg.focal_gamma,
+                label_smoothing=self.model_cfg.label_smoothing,
+                focal_weight=0.5
+            )
+        return nn.CrossEntropyLoss(label_smoothing=self.model_cfg.label_smoothing)
 
-        if self.train_cfg.optimizer == 'adamw':
-            return AdamW(
-                params,
-                lr=self.train_cfg.learning_rate,
-                weight_decay=self.train_cfg.weight_decay,
-                betas=(0.9, 0.98)
-            )
-        elif self.train_cfg.optimizer == 'adam':
-            return torch.optim.Adam(
-                params,
-                lr=self.train_cfg.learning_rate,
-                weight_decay=self.train_cfg.weight_decay
-            )
-        elif self.train_cfg.optimizer == 'sgd':
-            return torch.optim.SGD(
-                params,
-                lr=self.train_cfg.learning_rate,
-                momentum=0.9,
-                weight_decay=self.train_cfg.weight_decay
-            )
+    def _create_optimizer(self) -> torch.optim.Optimizer:
+        """Create optimizer."""
+        cfg = self.train_cfg
+        lr, wd = cfg.learning_rate, cfg.weight_decay
+
+        if cfg.optimizer == 'adamw':
+            return AdamW(self.raw_model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.98))
+        elif cfg.optimizer == 'adam':
+            return torch.optim.Adam(self.raw_model.parameters(), lr=lr, weight_decay=wd)
+        elif cfg.optimizer == 'sgd':
+            return torch.optim.SGD(self.raw_model.parameters(), lr=lr, momentum=0.9, weight_decay=wd)
         else:
-            raise ValueError(f"Unknown optimizer: {self.train_cfg.optimizer}")
+            raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
 
     def _create_scheduler(self):
-        """Create learning rate scheduler"""
-        if self.train_cfg.scheduler == 'cosine':
-            return CosineAnnealingWarmRestarts(
-                self.optimizer,
-                T_0=10,
-                T_mult=2,
-                eta_min=self.train_cfg.min_lr
-            )
-        elif self.train_cfg.scheduler == 'plateau':
-            return ReduceLROnPlateau(
-                self.optimizer,
-                mode='max',
-                factor=0.5,
-                patience=5,
-                verbose=True
-            )
-        elif self.train_cfg.scheduler == 'step':
-            return torch.optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=30,
-                gamma=0.1
-            )
+        """Create learning rate scheduler."""
+        cfg = self.train_cfg
+        opt = self.optimizer
+
+        if cfg.scheduler == 'cosine':
+            return CosineAnnealingWarmRestarts(opt, T_0=10, T_mult=2, eta_min=cfg.min_lr)
+        elif cfg.scheduler == 'plateau':
+            return ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5, verbose=True)
+        elif cfg.scheduler == 'step':
+            return torch.optim.lr_scheduler.StepLR(opt, step_size=30, gamma=0.1)
         return None
+
+    def _clip_gradients(self):
+        """Clip gradients if configured."""
+        if self.train_cfg.grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), self.train_cfg.grad_clip)
 
     def _forward_backward_step(self, features: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Execute forward and backward pass with optional mixed precision."""
@@ -227,9 +192,7 @@ class Trainer:
 
             if self.is_distributed or self.train_cfg.grad_clip is not None:
                 self.scaler.unscale_(self.optimizer)
-
-            if self.train_cfg.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), self.train_cfg.grad_clip)
+            self._clip_gradients()
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -237,22 +200,19 @@ class Trainer:
             outputs = self.model(features)
             loss = self.criterion(outputs, targets) / self.world_size
             loss.backward()
-
-            if self.train_cfg.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.raw_model.parameters(), self.train_cfg.grad_clip)
-
+            self._clip_gradients()
             self.optimizer.step()
 
         return outputs, loss
 
-    def _aggregate_metrics(self, total_loss: float, correct: int, total: int) -> tuple[float, float, float]:
+    def _aggregate_metrics(self, total_loss: float, correct: int, total: int) -> tuple[float, int, int]:
         """Aggregate metrics across distributed processes."""
         if not self.is_distributed:
-            return total_loss, float(correct), float(total)
+            return total_loss, correct, total
 
-        metrics_tensor = torch.tensor([total_loss, correct, total], device=self.device)
-        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
-        return metrics_tensor.tolist()
+        metrics = torch.tensor([total_loss, correct, total], device=self.device)
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        return metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 
     def _train_epoch(self, log_interval: int = 10) -> Dict[str, float]:
         """Train one epoch with periodic logging instead of tqdm."""
@@ -261,15 +221,11 @@ class Trainer:
         if hasattr(self.train_loader.sampler, 'set_epoch'):
             self.train_loader.sampler.set_epoch(self.current_epoch)
 
-        total_loss = 0.0
-        correct = 0
-        total = 0
+        total_loss = correct = total = 0
         all_preds, all_targets = [], []
-
         num_batches = len(self.train_loader)
-        start_time = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
-        end_time = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
 
+        start_time = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
         if start_time:
             start_time.record()
 
@@ -288,26 +244,22 @@ class Trainer:
                 all_preds.extend(predicted.cpu().numpy())
                 all_targets.extend(targets.cpu().numpy())
 
-            # Log progress at intervals (only on rank 0)
             if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
                 current_loss = total_loss / (batch_idx + 1)
                 current_acc = 100. * correct / total
 
-                # Calculate throughput
-                if start_time and end_time:
+                throughput_info = ""
+                if start_time:
+                    end_time = torch.cuda.Event(enable_timing=True)
                     end_time.record()
                     torch.cuda.synchronize()
-                    elapsed_ms = start_time.elapsed_time(end_time)
-                    samples_per_sec = (batch_idx + 1) * self.train_cfg.batch_size / (elapsed_ms / 1000)
+                    elapsed_s = start_time.elapsed_time(end_time) / 1000
+                    samples_per_sec = (batch_idx + 1) * self.train_cfg.batch_size / elapsed_s
                     throughput_info = f", {samples_per_sec:.1f} samples/s"
-                else:
-                    throughput_info = ""
 
                 self.logger.info(
-                    f"Epoch [{self.current_epoch}] "
-                    f"Batch [{batch_idx + 1}/{num_batches}] "
-                    f"Loss: {unscaled_loss:.4f} (avg: {current_loss:.4f}), "
-                    f"Acc: {current_acc:.2f}%{throughput_info}"
+                    f"Epoch [{self.current_epoch}] Batch [{batch_idx + 1}/{num_batches}] "
+                    f"Loss: {unscaled_loss:.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%{throughput_info}"
                 )
 
             # TensorBoard logging
@@ -323,46 +275,30 @@ class Trainer:
         epoch_loss = total_loss / len(self.train_loader)
         epoch_acc = correct / total
 
-        # Gather predictions for F1 calculation from all ranks
         if self.is_distributed:
             all_preds = self._gather_lists(all_preds)
             all_targets = self._gather_lists(all_targets)
 
-        # Synchronize at end of epoch
-        if self.is_distributed:
-            dist.barrier()
-
-        # All ranks can now compute metrics since they have gathered data
-        if len(all_targets) > 0 and len(all_preds) > 0:
-            from sklearn.metrics import f1_score, precision_score, recall_score
-            try:
-                f1 = f1_score(all_targets, all_preds, average='macro')
-                precision = precision_score(all_targets, all_preds, average='macro')
-                recall = recall_score(all_targets, all_preds, average='macro')
-            except Exception as e:
-                self.logger.warning(f"Failed to compute train metrics: {e}")
-                f1 = precision = recall = 0.0
+        if all_targets and all_preds:
+            f1 = f1_score(all_targets, all_preds, average='macro')
+            precision = precision_score(all_targets, all_preds, average='macro')
+            recall = recall_score(all_targets, all_preds, average='macro')
         else:
             f1 = precision = recall = 0.0
 
         return {'loss': epoch_loss, 'accuracy': epoch_acc, 'f1': f1, 'precision': precision, 'recall': recall}
 
     def _gather_lists(self, local_list: list) -> list:
-        """Gather lists from all ranks to all ranks using all_gather_object."""
+        """Gather lists from all ranks using all_gather_object."""
         if not self.is_distributed:
             return local_list
 
-        # Use all_gather_object which is more robust than gather_object
-        # All ranks must participate
         gathered_lists = [None] * self.world_size
         try:
             dist.all_gather_object(gathered_lists, local_list)
-            # Flatten list of lists
-            result = [item for sublist in gathered_lists for item in sublist]
-            return result
+            return [item for sublist in gathered_lists for item in sublist]
         except Exception as e:
             self.logger.warning(f"Failed to gather lists: {e}")
-            # Fallback: return local list
             return local_list
 
     @torch.no_grad()
@@ -400,49 +336,37 @@ class Trainer:
             all_targets.extend(targets.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
 
-            # Log progress at intervals (only on rank 0)
             if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
                 current_loss = total_loss / (batch_idx + 1)
                 current_acc = 100. * correct / total
                 self.logger.info(
-                    f"Validation "
-                    f"Batch [{batch_idx + 1}/{num_batches}] "
-                    f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), "
-                    f"Acc: {current_acc:.2f}%"
+                    f"Validation Batch [{batch_idx + 1}/{num_batches}] "
+                    f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%"
                 )
 
-        # Aggregate metrics across all processes
         if self.is_distributed:
-            metrics_tensor = torch.tensor([total_loss, correct, total], device=self.device)
-            dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
-            total_loss, correct, total = metrics_tensor.tolist()
+            metrics = torch.tensor([total_loss, correct, total], device=self.device)
+            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            total_loss, correct, total = metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 
-            # Gather predictions for F1/Precision/Recall/AUC calculation
-            # All ranks must participate in all_gather_object
             all_preds = self._gather_lists(all_preds)
             all_targets = self._gather_lists(all_targets)
             all_probs = self._gather_lists(all_probs)
 
-        val_loss = total_loss / len(self.val_loader) if len(self.val_loader) > 0 else 0
-        val_acc = correct / total if total > 0 else 0
+        val_loss = total_loss / max(len(self.val_loader), 1)
+        val_acc = correct / max(total, 1)
 
-        # All ranks now have the gathered data, so all can compute metrics
-        # But we only need metrics on rank 0 for logging
-        if len(all_targets) > 0 and len(all_preds) > 0:
+        f1 = precision = recall = auc = 0.0
+        if all_targets and all_preds:
             from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
             try:
                 f1 = f1_score(all_targets, all_preds, average='macro')
                 precision = precision_score(all_targets, all_preds, average='macro')
                 recall = recall_score(all_targets, all_preds, average='macro')
-            except Exception as e:
-                self.logger.warning(f"Failed to compute F1/Precision/Recall: {e}")
-                f1 = precision = recall = 0.0
-            try:
                 auc = roc_auc_score(all_targets, all_probs)
-            except Exception:
+            except Exception as e:
+                self.logger.warning(f"Failed to compute metrics: {e}")
                 auc = 0.5
-        else:
-            f1 = precision = recall = auc = 0.0
 
         return {
             'loss': val_loss,
@@ -454,7 +378,7 @@ class Trainer:
         }
 
     def _save_checkpoint(self, filename: str, is_best: bool = False):
-        """Save model checkpoint (only on rank 0)"""
+        """Save model checkpoint (only on rank 0)."""
         if self.rank != 0:
             return
 
@@ -465,7 +389,6 @@ class Trainer:
             'best_val_f1': self.best_val_f1,
             'config': self.config,
         }
-
         if self.swa_model is not None:
             checkpoint['swa_state_dict'] = self.swa_model.state_dict()
 
@@ -478,6 +401,35 @@ class Trainer:
             torch.save(checkpoint, best_path)
             self.logger.info(f"Best model saved: {best_path}")
 
+    def _check_early_stopping(self, val_f1: float, epoch: int) -> bool:
+        """Check if early stopping should be triggered. Returns True if should stop."""
+        cfg = self.train_cfg
+
+        if val_f1 > self.best_val_f1:
+            self.best_val_f1 = val_f1
+            self.patience_counter = 0
+            if cfg.save_best_only:
+                self._save_checkpoint('best_model.pt', is_best=True)
+        else:
+            self.patience_counter += 1
+            if cfg.early_stopping_patience and self.patience_counter >= cfg.early_stopping_patience:
+                self.logger.info(f"Early stopping triggered at epoch {epoch}")
+                return True
+
+        if not cfg.save_best_only:
+            self._save_checkpoint(f'checkpoint_epoch_{epoch}.pt')
+
+        return False
+
+    def _sync_early_stopping(self, should_stop: bool) -> bool:
+        """Synchronize early stopping decision across all ranks."""
+        if not self.is_distributed:
+            return should_stop
+
+        should_stop_tensor = torch.tensor([should_stop], dtype=torch.int32, device=self.device)
+        dist.broadcast(should_stop_tensor, src=0)
+        return should_stop_tensor.item() != 0
+
     def train(self):
         """Main training loop"""
         self.logger.info("Starting training...")
@@ -487,8 +439,8 @@ class Trainer:
 
         for epoch in range(self.train_cfg.num_epochs):
             self.current_epoch = epoch
+            should_stop = False
 
-            # Train
             train_metrics = self._train_epoch()
 
             if self.rank == 0:
@@ -501,7 +453,6 @@ class Trainer:
                     for key, value in train_metrics.items():
                         self.writer.add_scalar(f'train/{key}', value, epoch)
 
-            # Validation (only on rank 0 to avoid redundant computation)
             if self.val_loader is not None and epoch % self.train_cfg.val_interval == 0:
                 val_metrics = self._validate()
 
@@ -516,39 +467,17 @@ class Trainer:
                         for key, value in val_metrics.items():
                             self.writer.add_scalar(f'val/{key}', value, epoch)
 
-                    # Learning rate scheduling
                     if self.scheduler is not None:
                         if isinstance(self.scheduler, ReduceLROnPlateau):
                             self.scheduler.step(val_metrics['f1'])
                         else:
                             self.scheduler.step()
 
-                    # Early stopping check
-                    val_f1 = val_metrics['f1']
-                    should_stop = torch.tensor(0, device=self.device)
-                    if val_f1 > self.best_val_f1:
-                        self.best_val_f1 = val_f1
-                        self.patience_counter = 0
-                        if self.train_cfg.save_best_only:
-                            self._save_checkpoint('best_model.pt', is_best=True)
-                    else:
-                        self.patience_counter += 1
-                        if self.train_cfg.early_stopping_patience and \
-                           self.patience_counter >= self.train_cfg.early_stopping_patience:
-                            self.logger.info(f"Early stopping triggered at epoch {epoch}")
-                            should_stop = torch.tensor(1, device=self.device)
+                    should_stop = self._check_early_stopping(val_metrics['f1'], epoch)
 
-                    # Regular checkpoint (non-best)
-                    if not self.train_cfg.save_best_only:
-                        self._save_checkpoint(f'checkpoint_epoch_{epoch}.pt')
-
-            # Synchronize early stopping decision across all ranks
             if self.is_distributed and self.val_loader is not None:
-                # Create should_stop tensor on non-rank-0 if not exists
-                if self.rank != 0:
-                    should_stop = torch.tensor(0, device=self.device)
-                dist.broadcast(should_stop, src=0)
-                if should_stop.item() == 1:
+                should_stop = self._sync_early_stopping(should_stop)
+                if should_stop:
                     break
 
             # Update SWA
@@ -556,61 +485,46 @@ class Trainer:
                 self.swa_model.update_parameters(self.raw_model)
                 self.swa_n += 1
 
-        # Final SWA model
         if self.train_cfg.use_swa and self.swa_model is not None and self.rank == 0:
             torch.optim.swa_utils.update_bn(self.train_loader, self.swa_model, device=self.device)
             self._save_checkpoint('swa_model.pt')
 
         if self.writer:
             self.writer.close()
-
         self.logger.info("Training completed!")
 
 
 def setup_distributed() -> Tuple[int, int, torch.device]:
-    """
-    Setup distributed training environment.
-
-    Returns:
-        Tuple of (rank, world_size, device)
-    """
+    """Setup distributed training environment."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        # Launched with torchrun or torch.distributed.launch
         rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
         local_rank = int(os.environ.get('LOCAL_RANK', 0))
     else:
-        # Single GPU training
-        rank = 0
-        world_size = 1
-        local_rank = 0
+        rank, world_size, local_rank = 0, 1, 0
 
-    if world_size > 1:
-        # Set NCCL environment variables for better stability
-        os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')
-        os.environ.setdefault('TORCH_NCCL_ASYNC_ERROR_HANDLING', '1')
+    if world_size <= 1:
+        return rank, world_size, torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        dist.init_process_group(backend='nccl', init_method='env://')
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f'cuda:{local_rank}')
+    # Multi-GPU DDP setup
+    os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')
+    os.environ.setdefault('TORCH_NCCL_ASYNC_ERROR_HANDLING', '1')
 
-        # Synchronize all processes after initialization
-        dist.barrier()
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dist.init_process_group(backend='nccl', init_method='env://', device_id=local_rank)
+    torch.cuda.set_device(local_rank)
 
-    return rank, world_size, device
+    return rank, world_size, torch.device(f'cuda:{local_rank}')
 
 
 def cleanup_distributed():
-    """Cleanup distributed training"""
+    """Cleanup distributed training."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 
 def load_data_dict(json_path: str) -> dict:
-    """Load data dictionary from JSON file"""
-    with open(json_path, 'r') as f:
+    """Load data dictionary from JSON file."""
+    with open(json_path) as f:
         return json.load(f)
 
 
@@ -682,28 +596,17 @@ def main():
 
         # Create datasets
         train_dataset = CryDataset(
-            train_dict,
-            config.dataset,
+            train_dict, config.dataset,
             aug_config=config.augmentation if config.training.use_augmentation else None,
             feat_config=config.feature
         )
 
-        val_dataset = None
-        val_loader = None
+        val_dataset = val_loader = None
         if args.val_list:
             if rank == 0:
                 logger.info(f"Loading validation data from: {args.val_list}")
             val_dict = load_data_dict(args.val_list)
-            val_dataset = CryDataset(
-                val_dict,
-                config.dataset,
-                aug_config=None,
-                feat_config=config.feature
-            )
-
-        # Synchronize after dataset creation
-        if world_size > 1:
-            dist.barrier()
+            val_dataset = CryDataset(val_dict, config.dataset, feat_config=config.feature)
 
         # Create samplers and loaders
         if world_size > 1:
@@ -730,12 +633,10 @@ def main():
         )
 
         if val_dataset:
-            # Validation should use all samples without balanced sampling
-            val_sampler = SequentialCrySampler(val_dataset)
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.training.batch_size,
-                sampler=val_sampler,
+                sampler=SequentialCrySampler(val_dataset),
                 num_workers=config.training.num_workers,
                 pin_memory=config.training.pin_memory and device.type == 'cuda',
                 collate_fn=collate_fn,
@@ -747,9 +648,7 @@ def main():
         # Create model
         if rank == 0:
             logger.info(f"Creating model: d_model={config.model.d_model}, n_layers={config.model.n_layers}")
-        # Calculate input feature dimension (with deltas if enabled)
         in_channels = config.feature.n_mels * config.feature.num_channels
-
         model = create_model(
             config=config.model,
             in_channels=in_channels,
@@ -760,10 +659,6 @@ def main():
         if rank == 0:
             print_model_summary(model)
 
-        # Synchronize after model creation
-        if world_size > 1:
-            dist.barrier()
-
         # Resume from checkpoint if specified
         start_epoch = 0
         if args.resume:
@@ -772,6 +667,10 @@ def main():
             checkpoint = torch.load(args.resume, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
             start_epoch = checkpoint.get('epoch', 0)
+
+        # Synchronize before training to ensure all ranks are ready
+        if world_size > 1:
+            dist.barrier()
 
         # Create trainer and train
         trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size)
