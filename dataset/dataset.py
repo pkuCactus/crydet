@@ -7,6 +7,8 @@ import logging
 import os
 import pickle
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -205,6 +207,8 @@ class CryDataset(Dataset):
         """
         Get file information from directory with caching support
 
+        Uses parallel processing for faster metadata reading.
+
         Args:
             data_dir: Directory path to search for audio files
 
@@ -229,20 +233,16 @@ class CryDataset(Dataset):
             except Exception as e:
                 LOGGER.warning(f"Cache load failed: {e}, rescanning...")
 
-        # Scan directory for audio files
-        file_infos = []
-        for root, _, files in tqdm.tqdm(os.walk(data_dir), desc=f"Scanning {data_dir}"):
-            # Sort files for deterministic order across ranks
+        # Collect all audio files first
+        audio_files = []
+        for root, _, files in os.walk(data_dir):
             for file in sorted(files):
                 if not file.lower().endswith(self.config.audio_suffixes):
                     continue
-                file_abs_path = os.path.join(root, file)
-                try:
-                    duration = sf.info(file_abs_path).duration
-                except RuntimeError:
-                    LOGGER.warning(f"Could not read audio info for {file_abs_path}, skipping.")
-                    continue
-                file_infos.append((file_abs_path, duration))
+                audio_files.append(os.path.join(root, file))
+
+        # Parallel processing for faster metadata reading
+        file_infos = self._parallel_get_durations(audio_files)
 
         # Save to cache with pickle (faster than JSON)
         if self.config.cache_dir:
@@ -259,6 +259,65 @@ class CryDataset(Dataset):
             except IOError as e:
                 LOGGER.warning(f"Failed to save cache: {e}")
 
+        return file_infos
+
+    @staticmethod
+    def _get_duration(file_path: str) -> Optional[Tuple[str, float]]:
+        """Get duration for a single file. Returns None on error."""
+        try:
+            # WAV files: use soundfile for fast header reading
+            if file_path.lower().endswith('.wav'):
+                return (file_path, sf.info(file_path).duration)
+
+            # Non-WAV files: try soundfile first (fast for FLAC), fallback to mutagen
+            try:
+                return (file_path, sf.info(file_path).duration)
+            except Exception:
+                # Fallback to mutagen for MP3/M4A if available
+                try:
+                    from mutagen.mp3 import MP3
+                    from mutagen.mp4 import MP4
+
+                    suffix = Path(file_path).suffix.lower()
+                    if suffix == '.mp3':
+                        audio = MP3(file_path)
+                    elif suffix in ('.m4a', '.mp4'):
+                        audio = MP4(file_path)
+                    else:
+                        return None
+                    return (file_path, audio.info.length)
+                except ImportError:
+                    LOGGER.debug(f"mutagen not installed, skipping {file_path}")
+                    return None
+        except Exception:
+            LOGGER.warning(f"Could not read audio info for {file_path}, skipping.")
+            return None
+
+    def _parallel_get_durations(self, file_paths: List[str]) -> List[Tuple[str, float]]:
+        """
+        Get durations for multiple files in parallel using ThreadPool.
+
+        ThreadPool is chosen because sf.info() is I/O bound (reading file headers)
+        and thread switching overhead is lower than process overhead.
+        """
+        if not file_paths:
+            return []
+
+        # Use 4x CPU cores for I/O bound tasks
+        max_workers = min(32, (os.cpu_count() or 1) * 4)
+
+        file_infos = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._get_duration, fp): fp for fp in file_paths}
+
+            for future in tqdm.tqdm(as_completed(futures), total=len(file_paths),
+                                    desc=f"Reading metadata ({max_workers} workers)"):
+                result = future.result()
+                if result is not None:
+                    file_infos.append(result)
+
+        # Sort for deterministic order across ranks
+        file_infos.sort(key=lambda x: x[0])
         return file_infos
 
     def _get_file_schedule(self, file_infos: List[Tuple[str, float]]) -> List[Tuple[str, float, float, bool]]:

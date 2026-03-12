@@ -7,6 +7,7 @@ scipy>=1.10.0
 soundfile>=0.12.0
 librosa>=0.11.0
 sox>=1.5.0
+mutagen>=1.47.0
 
 # Utilities
 pyyaml>=6.0
