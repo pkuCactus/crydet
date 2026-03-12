@@ -183,7 +183,8 @@ class DistributedCrySampler(Sampler):
 
         # Sync num_samples across ranks
         if world_size > 1:
-            t = torch.tensor([self.num_samples], dtype=torch.long)
+            device = torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
+            t = torch.tensor([self.num_samples], dtype=torch.long, device=device)
             dist.all_reduce(t, op=dist.ReduceOp.MIN)
             self.num_samples = int(t.item())
 
