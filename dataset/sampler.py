@@ -46,7 +46,8 @@ class CrySampler(Sampler):
             label = 'cry'
             if random.random() >= self.cry_rate:
                 label = random.choice(non_cry_labels)
-            yield label, (label_idx_map[label] + 1) % self.data_source.label_schedule_count[label]
+            yield label, label_idx_map[label]
+            label_idx_map[label] = (label_idx_map[label] + 1) % self.data_source.label_schedule_count[label]
 
     def __len__(self):
         """Return the total number of samples per epoch"""
@@ -134,7 +135,8 @@ class DistributedCrySampler(Sampler):
             label = 'cry'
             if random.random() > self.cry_rate:
                 label = random.choice(non_cry_labels)
-            idx = st_idx_map[label] + (label_idx_map[label] + 1) % label_schedule_count[label]
+            idx = st_idx_map[label] + label_idx_map[label]
+            label_idx_map[label] = (label_idx_map[label] + 1) % label_schedule_count[label]
             yield label, idx
 
     def __len__(self):

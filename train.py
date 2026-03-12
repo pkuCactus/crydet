@@ -74,7 +74,8 @@ def collate_fn(batch):
 
 def worker_init_fn(worker_id: int):
     """Initialize worker with unique seed for reproducibility."""
-    worker_seed = (torch.initial_seed() + worker_id) % (2**32)
+    # Use os.getpid() to ensure different seeds across processes
+    worker_seed = (os.getpid() * 1000 + worker_id) % (2**32)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
@@ -510,8 +511,9 @@ def setup_distributed() -> Tuple[int, int, torch.device]:
     os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')
     os.environ.setdefault('TORCH_NCCL_ASYNC_ERROR_HANDLING', '1')
 
-    dist.init_process_group(backend='nccl', init_method='env://', device_id=local_rank)
+    # Use compatible init_process_group API
     torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl', init_method='env://')
 
     return rank, world_size, torch.device(f'cuda:{local_rank}')
 
@@ -629,7 +631,7 @@ def main():
             collate_fn=collate_fn,
             worker_init_fn=worker_init_fn if config.training.num_workers > 0 else None,
             persistent_workers=False,  # Disable to avoid deadlock in DDP
-            drop_last=False
+            drop_last=True  # Important for DDP: avoid uneven batch sizes
         )
 
         if val_dataset is not None:
