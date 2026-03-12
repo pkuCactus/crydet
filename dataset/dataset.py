@@ -232,7 +232,8 @@ class CryDataset(Dataset):
         # Scan directory for audio files
         file_infos = []
         for root, _, files in tqdm.tqdm(os.walk(data_dir), desc=f"Scanning {data_dir}"):
-            for file in files:
+            # Sort files for deterministic order across ranks
+            for file in sorted(files):
                 if not file.lower().endswith(self.config.audio_suffixes):
                     continue
                 file_abs_path = os.path.join(root, file)

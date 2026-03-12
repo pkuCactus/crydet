@@ -346,6 +346,12 @@ class Trainer:
                 )
 
         if self.is_distributed:
+            # Gather num_batches from all ranks for correct loss averaging
+            local_batches = len(self.val_loader)
+            batches_tensor = torch.tensor([local_batches], device=self.device)
+            dist.all_reduce(batches_tensor, op=dist.ReduceOp.SUM)
+            total_batches = int(batches_tensor.item())
+
             metrics = torch.tensor([total_loss, correct, total], device=self.device)
             dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
             total_loss, correct, total = metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
@@ -353,8 +359,10 @@ class Trainer:
             all_preds = self._gather_lists(all_preds)
             all_targets = self._gather_lists(all_targets)
             all_probs = self._gather_lists(all_probs)
+        else:
+            total_batches = len(self.val_loader)
 
-        val_loss = total_loss / max(len(self.val_loader), 1)
+        val_loss = total_loss / max(total_batches, 1)
         val_acc = correct / max(total, 1)
 
         f1 = precision = recall = auc = 0.0
@@ -616,11 +624,11 @@ def main():
             train_sampler = DistributedCrySampler(
                 train_dataset,
                 cry_rate=config.dataset.cry_rate,
-                num_replicas=world_size,
-                rank=rank
+                shuffle=True,
+                seed=0
             )
         else:
-            train_sampler = CrySampler(train_dataset, cry_rate=config.dataset.cry_rate)
+            train_sampler = CrySampler(train_dataset, cry_rate=config.dataset.cry_rate, shuffle=True)
 
         train_loader = DataLoader(
             train_dataset,
@@ -638,13 +646,12 @@ def main():
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.training.batch_size,
-                sampler=SequentialCrySampler(val_dataset),
+                sampler=SequentialCrySampler(val_dataset, partition_rank=True),
                 num_workers=config.training.num_workers,
                 pin_memory=config.training.pin_memory and device.type == 'cuda',
                 collate_fn=collate_fn,
-                worker_init_fn=worker_init_fn,
-                persistent_workers=config.training.num_workers > 0,
-                multiprocessing_context='spawn' if config.training.num_workers > 0 else None
+                worker_init_fn=worker_init_fn if config.training.num_workers > 0 else None,
+                persistent_workers=False
             )
 
         # Create model

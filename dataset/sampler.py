@@ -5,7 +5,7 @@ Provides balanced sampling between cry/non-cry samples.
 """
 
 import random
-from typing import Optional
+from typing import Optional, Iterator
 
 import torch
 import torch.distributed as dist
@@ -13,17 +13,7 @@ from torch.utils.data import Sampler
 
 
 class CrySampler(Sampler):
-    """
-    Sampler that balances cry/non-cry samples.
-
-    Yields (label, file_idx) tuples with specified cry_rate probability.
-    Automatically cycles through samples when reaching the end.
-
-    Args:
-        data_source: CryDataset instance
-        cry_rate: Probability of sampling a cry sample (0-1)
-        shuffle: Whether to shuffle the dataset at initialization
-    """
+    """Sampler that balances cry/non-cry samples."""
 
     def __init__(self, data_source=None, cry_rate: float = 0.5, shuffle: bool = True):
         super().__init__()
@@ -31,13 +21,7 @@ class CrySampler(Sampler):
         self.data_source = data_source
         self.shuffle = shuffle
 
-    def __iter__(self):
-        """
-        Yield (label, file_idx) tuples.
-
-        Iterates through the dataset, yielding samples with the specified
-        cry_rate probability for cry samples.
-        """
+    def __iter__(self) -> Iterator[tuple[str, int]]:
         self.data_source.build_schedule(self.shuffle)
         label_idx_map = {label: 0 for label in self.data_source.label_schedule_count}
         non_cry_labels = [l for l in label_idx_map if l != 'cry']
@@ -49,99 +33,176 @@ class CrySampler(Sampler):
             yield label, label_idx_map[label]
             label_idx_map[label] = (label_idx_map[label] + 1) % self.data_source.label_schedule_count[label]
 
-    def __len__(self):
-        """Return the total number of samples per epoch"""
+    def __len__(self) -> int:
         return len(self.data_source)
 
 
 class SequentialCrySampler(Sampler):
-    """Sequential sampler for validation - iterates through all samples without balancing."""
+    """Sequential sampler for validation - distributed aware."""
 
-    def __init__(self, data_source=None):
+    def __init__(
+        self,
+        data_source=None,
+        shuffle: bool = False,
+        seed: int = 0,
+        partition_rank: bool = True
+    ):
         super().__init__()
         self.data_source = data_source
-        self.data_source.build_schedule()
+        self.shuffle = shuffle
+        self.seed = seed
+        self.partition_rank = partition_rank
+        self.rank, self.world_size = _get_rank_info()
 
-    def __iter__(self):
+        # Ensure schedule is built (synced across ranks if DDP)
+        if not self.data_source.file_schedule_dict:
+            _sync_schedule_from_rank0(self.data_source, shuffle=shuffle, seed=seed)
+
+        # Compute partition for this rank
+        self._indices = self._build_indices()
+
+    def _build_indices(self) -> list[tuple[str, int]]:
+        """Build list of (label, idx) for this rank."""
+        indices = []
         for label, schedules in self.data_source.file_schedule_dict.items():
-            for idx in range(len(schedules)):
-                yield (label, idx)
+            total = len(schedules)
+            if self.partition_rank and self.world_size > 1:
+                base = total // self.world_size
+                rem = total % self.world_size
+                count = base + (1 if self.rank < rem else 0)
+                start = self.rank * base + min(self.rank, rem)
+                end = start + count
+                indices.extend([(label, i) for i in range(start, end)])
+            else:
+                indices.extend([(label, i) for i in range(total)])
+        return indices
 
-    def __len__(self):
-        return sum(len(s) for s in self.data_source.file_schedule_dict.values())
+    def __iter__(self) -> Iterator[tuple[str, int]]:
+        for label, idx in self._indices:
+            yield label, idx
+
+    def __len__(self) -> int:
+        return len(self._indices)
 
 
-def _get_distributed_info(num_replicas: Optional[int], rank: Optional[int]) -> tuple[int, int]:
-    """Get distributed training info from environment or defaults."""
-    if not dist.is_available():
-        raise RuntimeError("Requires distributed package to be available")
-    return (
-        num_replicas if num_replicas is not None else dist.get_world_size(),
-        rank if rank is not None else dist.get_rank()
-    )
+def _get_rank_info() -> tuple[int, int]:
+    """Get (rank, world_size) from distributed env."""
+    if not dist.is_available() or not dist.is_initialized():
+        return 0, 1
+    return dist.get_rank(), dist.get_world_size()
+
+
+def _sync_schedule_from_rank0(dataset, shuffle: bool, seed: int) -> None:
+    """Build schedule on rank 0 and broadcast to all ranks."""
+    rank, world_size = _get_rank_info()
+
+    if world_size == 1:
+        dataset.build_schedule(shuffle=shuffle, seed=seed)
+        return
+
+    # Rank 0 builds schedule
+    if rank == 0:
+        dataset.build_schedule(shuffle=shuffle, seed=seed)
+        schedule = dataset.file_schedule_dict
+    else:
+        schedule = None
+
+    # Broadcast to all ranks
+    objects = [schedule]
+    dist.broadcast_object_list(objects, src=0)
+
+    # Non-rank-0: set the broadcasted schedule
+    if rank != 0:
+        dataset.file_schedule_dict = objects[0]
+        dataset._label_schedule_count = {
+            label: len(s) for label, s in dataset.file_schedule_dict.items()
+        }
 
 
 class DistributedCrySampler(Sampler):
     """
-    Distributed sampler that partitions file_schedule_dict across ranks.
+    Distributed sampler for cry detection.
 
-    Each rank gets an equal share of cry and non-cry samples, iterating
-    with cry_rate probability like CrySampler but only on local partition.
+    Each epoch:
+    1. Rank 0 generates schedule with fixed seed, broadcasts to all ranks
+    2. Each rank takes its partition of the data
+    3. Sample with cry_rate probability, cycling within partition
     """
 
     def __init__(
         self,
         data_source,
         cry_rate: float = 0.5,
-        num_replicas: Optional[int] = None,
-        rank: Optional[int] = None,
         shuffle: bool = True,
         seed: int = 0
     ):
-        num_replicas, rank = _get_distributed_info(num_replicas, rank)
-
+        super().__init__()
         self.data_source = data_source
         self.cry_rate = cry_rate
-        self.num_replicas = num_replicas
-        self.rank = rank
-        self.epoch = 0
         self.shuffle = shuffle
         self.seed = seed
-        self.num_samples = len(self.data_source) // num_replicas
+        self.epoch = 0
 
-    def _build_partition(self):
-        """Build cry and non-cry partitions for this rank."""
-        self.data_source.build_schedule(self.shuffle, seed=self.seed + self.epoch)
-        label_schedule_count = {}
-        st_idx_map = {}
-        for l, fs in self.data_source.file_schedule_dict.items():
-            samples_per_rank = max(len(fs) // self.num_replicas, 1)
-            st_idx_map[l] = (self.rank * samples_per_rank) % len(fs)
-            label_schedule_count[l] = samples_per_rank
-        if 'cry' not in label_schedule_count:
-            raise ValueError('cry is not in training')
+        _, self.world_size = _get_rank_info()
+        self._build_partition()
+
+    def _build_partition(self) -> None:
+        """Sync schedule from rank 0, then compute local partition."""
+        # All ranks get identical schedule
+        _sync_schedule_from_rank0(
+            self.data_source,
+            shuffle=self.shuffle,
+            seed=self.seed + self.epoch
+        )
+
+        # Compute partition for this rank
+        rank, world_size = _get_rank_info()
+        self._st_idx_map = {}
+        self._label_count = {}
+
+        for label, schedules in self.data_source.file_schedule_dict.items():
+            total = len(schedules)
+            base = total // world_size
+            rem = total % world_size
+
+            count = base + (1 if rank < rem else 0)
+            start = rank * base + min(rank, rem)
+
+            self._st_idx_map[label] = start
+            self._label_count[label] = count
+
+        # Calculate epoch length
+        cry = self._label_count.get('cry', 0)
+        non_cry = sum(c for l, c in self._label_count.items() if l != 'cry')
+
         self.num_samples = int(max(
-            label_schedule_count['cry'] / self.cry_rate,
-            sum([label_schedule_count[l] for l in label_schedule_count if l != 'cry']) / (1 - self.cry_rate)
-        ))
-        return st_idx_map, label_schedule_count
+            cry / self.cry_rate if self.cry_rate > 0 else 0,
+            non_cry / (1 - self.cry_rate) if self.cry_rate < 1 else 0
+        )) or (cry + non_cry)
 
-    def __iter__(self):
-        """Iterate with cry_rate probability, cycling through local partition."""
-        st_idx_map, label_schedule_count = self._build_partition()
-        non_cry_labels = [l for l in label_schedule_count if l != 'cry']
-        label_idx_map = {l: 0 for l in label_schedule_count}
+        # Sync num_samples across ranks
+        if world_size > 1:
+            t = torch.tensor([self.num_samples], dtype=torch.long)
+            dist.all_reduce(t, op=dist.ReduceOp.MIN)
+            self.num_samples = int(t.item())
+
+    def __iter__(self) -> Iterator[tuple[str, int]]:
+        non_cry = [l for l in self._label_count if l != 'cry']
+        pos = {l: 0 for l in self._label_count}
+
         for _ in range(self.num_samples):
-            label = 'cry'
-            if random.random() > self.cry_rate:
-                label = random.choice(non_cry_labels)
-            idx = st_idx_map[label] + label_idx_map[label]
-            label_idx_map[label] = (label_idx_map[label] + 1) % label_schedule_count[label]
-            yield label, idx
+            if random.random() < self.cry_rate:
+                label = 'cry'
+            else:
+                label = random.choice(non_cry) if non_cry else 'cry'
 
-    def __len__(self):
+            offset = pos[label] % self._label_count[label]
+            yield label, self._st_idx_map[label] + offset
+            pos[label] += 1
+
+    def __len__(self) -> int:
         return self.num_samples
 
-    def set_epoch(self, epoch: int):
-        """Rebuild partition for new epoch with optional shuffling."""
+    def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
+        self._build_partition()
