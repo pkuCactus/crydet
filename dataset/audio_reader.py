@@ -93,21 +93,21 @@ class AudioReader:
             return waveform, self.target_sr
 
         # Slow path: need resampling
-        cache_path = self._get_cache_path(file_path, orig_sr)
-
-        # Check if cached WAV exists and is valid
-        if self.cache_dir and cache_path.exists():
-            # Verify cache is not stale (check mtime)
-            cache_meta_path = cache_path.with_suffix('.json')
-            if cache_meta_path.exists():
-                with open(cache_meta_path, 'r') as f:
-                    meta = json.load(f)
-                # Cache is valid if source hasn't been modified
-                if meta.get('source_mtime') == file_path.stat().st_mtime_ns:
-                    waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
-                    if self.force_mono and waveform.ndim > 1:
-                        waveform = np.mean(waveform, axis=1)
-                    return waveform, self.target_sr
+        if self.cache_dir:
+            cache_path = self._get_cache_path(file_path, orig_sr)
+            # Check if cached WAV exists and is valid
+            if cache_path.exists():
+                # Verify cache is not stale (check mtime)
+                cache_meta_path = cache_path.with_suffix('.json')
+                if cache_meta_path.exists():
+                    with open(cache_meta_path, 'r') as f:
+                        meta = json.load(f)
+                    # Cache is valid if source hasn't been modified
+                    if meta.get('source_mtime') == file_path.stat().st_mtime_ns:
+                        waveform = sf.read(cache_path, dtype='float32', start=start, stop=stop)[0]
+                        if self.force_mono and waveform.ndim > 1:
+                            waveform = np.mean(waveform, axis=1)
+                        return waveform, self.target_sr
 
         # Load entire audio, resample, and cache
         waveform, _ = sf.read(file_path, dtype='float32')

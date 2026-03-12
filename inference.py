@@ -69,7 +69,7 @@ class CryDetector:
 
         # Load model
         LOGGER.info(f"Loading model from: {checkpoint_path}")
-        self.checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.config = self.checkpoint['config']
 
         self.model = create_model(
