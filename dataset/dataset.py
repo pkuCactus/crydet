@@ -80,9 +80,6 @@ class CryDataset(Dataset):
                 sample_rate=config.sample_rate,
                 audio_reader=self.audio_reader,
             )
-        # 构建文件调度字典
-        self.generate_schedule()
-
 
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index
@@ -120,7 +117,7 @@ class CryDataset(Dataset):
             cry_count / self.config.cry_rate
         ))
 
-    def generate_schedule(self, shuffle: bool = False, seed: Optional[int] = None):
+    def build_schedule(self, shuffle: bool = False, seed: Optional[int] = None):
         """Regenerate file schedules with new random slicing and energy filtering.
 
         Args:
@@ -154,9 +151,7 @@ class CryDataset(Dataset):
             for schedules in self.file_schedule_dict.values():
                 random.shuffle(schedules)
 
-        self._other_labels = [label for label in self.file_schedule_dict if label != 'cry'
-                              for _ in range(self.data_dict[label][0])]
-        self._num_samples = {label: len(s) for label, s in self.file_schedule_dict.items()}
+        self._label_schedule_count = {label: len(s) for label, s in self.file_schedule_dict.items()}
 
         if self.augmenter is not None:
             self.augmenter.file_schedule_dict = self.file_schedule_dict
@@ -202,12 +197,8 @@ class CryDataset(Dataset):
         return valid_schedules
 
     @property
-    def other_labels(self) -> List[str]:
-        return self._other_labels
-
-    @property
-    def num_samples(self) -> dict:
-        return self._num_samples
+    def label_shedule_count(self) -> List[str]:
+        return self._label_schedule_count
 
     def _get_file_infos(self, data_dir: str) -> List[Tuple[str, float]]:
         """
