@@ -198,7 +198,7 @@ class CryDataset(Dataset):
         return valid_schedules
 
     @property
-    def label_shedule_count(self) -> List[str]:
+    def label_schedule_count(self) -> List[str]:
         return self._label_schedule_count
 
     def _get_file_infos(self, data_dir: str) -> List[Tuple[str, float]]:
