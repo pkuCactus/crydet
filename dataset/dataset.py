@@ -265,58 +265,46 @@ class CryDataset(Dataset):
     def _get_duration(file_path: str) -> Optional[Tuple[str, float]]:
         """Get duration for a single file. Returns None on error."""
         try:
-            # WAV files: use soundfile for fast header reading
-            if file_path.lower().endswith('.wav'):
-                return (file_path, sf.info(file_path).duration)
-
-            # Non-WAV files: try soundfile first (fast for FLAC), fallback to mutagen
-            try:
-                return (file_path, sf.info(file_path).duration)
-            except Exception:
-                # Fallback to mutagen for MP3/M4A if available
-                try:
-                    from mutagen.mp3 import MP3
-                    from mutagen.mp4 import MP4
-
-                    suffix = Path(file_path).suffix.lower()
-                    if suffix == '.mp3':
-                        audio = MP3(file_path)
-                    elif suffix in ('.m4a', '.mp4'):
-                        audio = MP4(file_path)
-                    else:
-                        return None
-                    return (file_path, audio.info.length)
-                except ImportError:
-                    LOGGER.debug(f"mutagen not installed, skipping {file_path}")
-                    return None
+            # Try soundfile first (fast for WAV/FLAC)
+            return (file_path, sf.info(file_path).duration)
         except Exception:
-            LOGGER.warning(f"Could not read audio info for {file_path}, skipping.")
-            return None
+            pass
+
+        # Fallback to mutagen for MP3/M4A
+        try:
+            from mutagen.mp3 import MP3
+            from mutagen.mp4 import MP4
+
+            suffix = Path(file_path).suffix.lower()
+            if suffix == '.mp3':
+                return (file_path, MP3(file_path).info.length)
+            elif suffix in ('.m4a', '.mp4'):
+                return (file_path, MP4(file_path).info.length)
+        except ImportError:
+            LOGGER.debug(f"mutagen not installed, skipping {file_path}")
+        except Exception:
+            pass
+
+        LOGGER.warning(f"Could not read audio info for {file_path}, skipping.")
+        return None
 
     def _parallel_get_durations(self, file_paths: List[str]) -> List[Tuple[str, float]]:
-        """
-        Get durations for multiple files in parallel using ThreadPool.
-
-        ThreadPool is chosen because sf.info() is I/O bound (reading file headers)
-        and thread switching overhead is lower than process overhead.
-        """
+        """Get durations for multiple files in parallel using ThreadPool."""
         if not file_paths:
             return []
 
-        # Use 4x CPU cores for I/O bound tasks
         max_workers = min(32, (os.cpu_count() or 1) * 4)
 
-        file_infos = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self._get_duration, fp): fp for fp in file_paths}
+            futures = [executor.submit(self._get_duration, fp) for fp in file_paths]
 
-            for future in tqdm.tqdm(as_completed(futures), total=len(file_paths),
-                                    desc=f"Reading metadata ({max_workers} workers)"):
-                result = future.result()
-                if result is not None:
-                    file_infos.append(result)
+            results = [
+                future.result()
+                for future in tqdm.tqdm(as_completed(futures), total=len(file_paths),
+                                        desc=f"Reading metadata ({max_workers} workers)")
+            ]
 
-        # Sort for deterministic order across ranks
+        file_infos = [r for r in results if r is not None]
         file_infos.sort(key=lambda x: x[0])
         return file_infos
 
