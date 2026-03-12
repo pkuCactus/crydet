@@ -113,11 +113,16 @@ class DistributedCrySampler(Sampler):
         self.data_source.build_schedule(self.shuffle, seed=self.seed + self.epoch)
         label_schedule_count = {}
         st_idx_map = {}
-        self.num_samples = 0
         for l, fs in self.data_source.file_schedule_dict.items():
             samples_per_rank = max(len(fs) // self.num_replicas, 1)
             st_idx_map[l] = (self.rank * samples_per_rank) % len(fs)
             label_schedule_count[l] = samples_per_rank
+        if 'cry' not in label_schedule_count:
+            raise ValueError('cry is not in training')
+        self.num_samples = int(max(
+            label_schedule_count['cry'] / self.cry_rate,
+            sum([label_schedule_count[l] for l in label_schedule_count if l != 'cry']) / (1 - self.cry_rate)
+        ))
         return st_idx_map, label_schedule_count
 
     def __iter__(self):
