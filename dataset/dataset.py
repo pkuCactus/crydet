@@ -80,6 +80,7 @@ class CryDataset(Dataset):
                 sample_rate=config.sample_rate,
                 audio_reader=self.audio_reader,
             )
+        self.build_schedule()
 
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index

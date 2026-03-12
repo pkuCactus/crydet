@@ -632,7 +632,7 @@ def main():
             drop_last=False
         )
 
-        if val_dataset:
+        if val_dataset is not None:
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.training.batch_size,
