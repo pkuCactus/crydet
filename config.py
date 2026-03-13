@@ -162,7 +162,7 @@ class FeatureConfig:
 @dataclass
 class DatasetConfig:
     """Dataset configuration"""
-    audio_suffixes: tuple = ('.wav', '.mp3', '.flac')
+    audio_suffixes: tuple = ('.wav',)
     sample_rate: int = 16000
     slice_len: float = 5.0
     stride: float = 3.0

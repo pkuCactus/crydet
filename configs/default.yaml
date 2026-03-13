@@ -18,8 +18,6 @@ feature:
 dataset:
   audio_suffixes:
     - .wav
-    - .mp3
-    - .flac
   sample_rate: 16000           # Target sample rate for audio
   slice_len: 5.0               # Duration of each audio segment (seconds)
   stride: 3.0                  # Stride between segments (seconds)

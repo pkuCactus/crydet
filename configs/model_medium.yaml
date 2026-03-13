@@ -18,8 +18,6 @@ feature:
 dataset:
   audio_suffixes:
     - .wav
-    - .mp3
-    - .flac
   sample_rate: 16000
   slice_len: 5.0
   stride: 3.0

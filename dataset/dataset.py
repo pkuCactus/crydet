@@ -8,7 +8,6 @@ import os
 import pickle
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -271,30 +270,12 @@ class CryDataset(Dataset):
 
     @staticmethod
     def _get_duration(file_path: str) -> Optional[Tuple[str, float]]:
-        """Get duration for a single file. Returns None on error."""
+        """Get duration for a single WAV file. Returns None on error."""
         try:
-            # Try soundfile first (fast for WAV/FLAC)
             return (file_path, sf.info(file_path).duration)
         except Exception:
-            pass
-
-        # Fallback to mutagen for MP3/M4A
-        try:
-            from mutagen.mp3 import MP3
-            from mutagen.mp4 import MP4
-
-            suffix = Path(file_path).suffix.lower()
-            if suffix == '.mp3':
-                return (file_path, MP3(file_path).info.length)
-            elif suffix in ('.m4a', '.mp4'):
-                return (file_path, MP4(file_path).info.length)
-        except ImportError:
-            LOGGER.debug(f"mutagen not installed, skipping {file_path}")
-        except Exception:
-            pass
-
-        LOGGER.warning(f"Could not read audio info for {file_path}, skipping.")
-        return None
+            LOGGER.warning(f"Could not read audio info for {file_path}, skipping.")
+            return None
 
     def _parallel_get_durations(self, file_paths: List[str]) -> List[Tuple[str, float]]:
         """Get durations for multiple files in parallel using ThreadPool."""
