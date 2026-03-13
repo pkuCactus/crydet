@@ -22,11 +22,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 def collect_all_files(data_dir: str) -> list:
-    """收集目录下所有文件（非递归）"""
+    """递归收集目录下所有文件"""
     files = []
-    for entry in os.scandir(data_dir):
-        if entry.is_file():
-            files.append(entry.path)
+    for root, _, filenames in os.walk(data_dir):
+        for filename in filenames:
+            files.append(os.path.join(root, filename))
     return files
 
 
