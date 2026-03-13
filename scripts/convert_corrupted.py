@@ -188,19 +188,28 @@ def convert_to_wav(input_path: str, output_path: str, info: dict = None) -> bool
         return False
 
 
+AUDIO_EXTENSIONS = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.wma', '.au', '.snd'}
+
+
 def process_file(args: tuple) -> tuple:
     """
     处理单个文件
 
     Returns:
         (input_path, success, output_path_or_error, action)
-        action: 'converted', 'deleted_short', 'deleted_invalid', 'failed'
+        action: 'converted', 'deleted_short', 'deleted_invalid', 'skipped_non_audio', 'failed'
     """
     input_path, output_dir, keep_structure, min_duration = args
 
     # 检查输入文件是否存在
     if not os.path.exists(input_path):
         return (input_path, False, "File not found", 'failed')
+
+    # 检查是否为音频文件（通过后缀）
+    file_suffix = Path(input_path).suffix.lower()
+    if file_suffix not in AUDIO_EXTENSIONS:
+        LOGGER.debug(f"Skipping non-audio file: {input_path} (suffix: {file_suffix})")
+        return (input_path, True, f"Non-audio file (suffix: {file_suffix})", 'skipped_non_audio')
 
     # 获取音频信息
     info = get_audio_info(input_path)
@@ -312,6 +321,7 @@ def main():
     converted_count = 0
     deleted_short_count = 0
     deleted_invalid_count = 0
+    skipped_non_audio_count = 0
     failed_files = []
 
     LOGGER.info(f"Starting conversion with {args.workers} workers...")
@@ -330,6 +340,8 @@ def main():
                 deleted_short_count += 1
             elif action == 'deleted_invalid':
                 deleted_invalid_count += 1
+            elif action == 'skipped_non_audio':
+                skipped_non_audio_count += 1
             elif action == 'failed':
                 failed_files.append((input_path, result))
                 LOGGER.error(f"Failed: {input_path} - {result}")
@@ -338,6 +350,7 @@ def main():
     LOGGER.info(f"Complete: {converted_count} converted, "
                 f"{deleted_short_count} deleted (too short), "
                 f"{deleted_invalid_count} deleted (invalid duration), "
+                f"{skipped_non_audio_count} skipped (non-audio), "
                 f"{len(failed_files)} failed")
 
     if failed_files:
