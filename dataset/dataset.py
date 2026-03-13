@@ -343,8 +343,8 @@ class CryDataset(Dataset):
             dir_list = dir_list[1:] if label != 'cry' else dir_list
             file_infos = []
             for dir_ in dir_list:
-                file_infos.extend(self._get_file_infos(dir_, skip_short=(label=='cry')))
-            file_schedule_dict[label] = self._get_file_schedule(file_infos)
+                file_infos.extend(self._get_file_infos(dir_))
+            file_schedule_dict[label] = self._get_file_schedule(file_infos, skip_short=(label=='cry'))
             if not file_schedule_dict[label]:
                 raise ValueError(f"No valid audio files found for label '{label}' in directories: {dir_list}")
         return file_schedule_dict
