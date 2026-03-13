@@ -22,9 +22,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 def collect_all_files(data_dir: str) -> list:
-    """递归收集目录下所有文件"""
+    """递归收集目录下所有文件（带进度条）"""
     files = []
-    for root, _, filenames in os.walk(data_dir):
+    # 先遍历获取目录结构用于进度显示
+    LOGGER.info(f"Walking directory: {data_dir}")
+    walk_results = list(os.walk(data_dir))
+
+    for root, _, filenames in tqdm.tqdm(walk_results, desc="Scanning directories"):
         for filename in filenames:
             files.append(os.path.join(root, filename))
     return files
@@ -75,6 +79,7 @@ def find_non_allowed_files(
     LOGGER.info(f"Found {len(all_files)} files, checking with {max_workers} workers...")
 
     allowed_count = 0
+    non_allowed_count = 0
     non_allowed_files = []
 
     # 并行检查
@@ -83,12 +88,20 @@ def find_non_allowed_files(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_file, arg): arg[0] for arg in check_args}
 
-        for future in tqdm.tqdm(as_completed(futures), total=len(check_args), desc="Checking"):
+        pbar = tqdm.tqdm(total=len(check_args), desc="Checking files")
+        for future in as_completed(futures):
             file_path, is_allowed, suffix = future.result()
             if is_allowed:
                 allowed_count += 1
             else:
+                non_allowed_count += 1
                 non_allowed_files.append((file_path, suffix))
+            pbar.update(1)
+            pbar.set_postfix({
+                'allowed': allowed_count,
+                'non_allowed': non_allowed_count
+            })
+        pbar.close()
 
     # 保存结果
     if non_allowed_files:
