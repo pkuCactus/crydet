@@ -33,7 +33,7 @@ def parse_corrupted_list(input_file: str) -> list:
         for line in f:
             line = line.strip()
             # 跳过注释和空行
-            if not line or line.startswith('#') or line.startswith('  '):
+            if not line or line.startswith('#') or line.startswith('Error'):
                 continue
             # 处理 "文件路径\t错误信息" 格式
             if line.startswith("/"):
