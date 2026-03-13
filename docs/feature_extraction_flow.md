@@ -73,7 +73,7 @@ graph TB
 
 ```mermaid
 flowchart TD
-    A[原始音频文件<br/>.wav/.mp3] --> B[是否缓存检查]
+    A["原始音频文件\n.wav/.mp3"] --> B[是否缓存检查]
     B -->|存在缓存| C[加载缓存音频]
     B -->|无缓存| D[使用librosa加载音频]
     D --> E[采样率检查]
@@ -85,7 +85,7 @@ flowchart TD
     I --> J[NaN值检查]
     J --> K[信号归一化]
     K --> L[边界填充]
-    L --> M[分帧处理<br/>NFFT=1024, HOP=500]
+    L --> M["分帧处理\nNFFT=1024, HOP=500"]
     M --> N[预加重滤波]
     N --> O[汉宁窗加窗]
     O --> P[计算FFT]
@@ -185,26 +185,26 @@ sequenceDiagram
 ```mermaid
 graph LR
     subgraph "数据输入"
-        A[音频文件<br/>16kHz mono]
+        A["音频文件\n16kHz mono"]
     end
 
     subgraph "预处理阶段"
-        B[缓存层<br/>cache_resample/]
-        C[数据层<br/>PCM数组]
+        B["缓存层\ncache_resample/"]
+        C["数据层\nPCM数组"]
     end
 
     subgraph "特征提取阶段"
-        D[时序层<br/>分帧处理]
-        E[频域层<br/>FFT+Mel]
-        F[特征层<br/>多维度输出]
+        D["时序层\n分帧处理"]
+        E["频域层\nFFT+Mel"]
+        F["特征层\n多维度输出"]
     end
 
     subgraph "输出层"
-        G[fft<br/>频谱特征]
-        H[fbank<br/>Mel频谱]
-        I[mfcc<br/>倒谱特征]
-        J[db<br/>能量特征]
-        K[mask<br/>掩码统计]
+        G["fft\n频谱特征"]
+        H["fbank\nMel频谱"]
+        I["mfcc\n倒谱特征"]
+        J["db\n能量特征"]
+        K["mask\n掩码统计"]
     end
 
     A --> B

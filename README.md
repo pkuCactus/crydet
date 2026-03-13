@@ -201,9 +201,17 @@ crydet/
 └── export.py              # 模型导出
 ```
 
-## 算法设计
+## 文档
 
-详见 [docs/transformer_cry_detection_design.md](docs/transformer_cry_detection_design.md)
+详细文档请查看 [docs/README.md](docs/README.md)：
+
+| 文档 | 描述 |
+|------|------|
+| [docs/transformer_cry_detection_design.md](docs/transformer_cry_detection_design.md) | Transformer 模型架构设计文档 |
+| [docs/data_augmentation.md](docs/data_augmentation.md) | 数据增强策略与流程 |
+| [docs/feature_extraction_flow.md](docs/feature_extraction_flow.md) | 特征提取流程详解 |
+| [docs/inference_examples.md](docs/inference_examples.md) | 推理使用指南与示例 |
+| [CLAUDE.md](CLAUDE.md) | 项目架构与开发规范 |
 
 ## 许可证
 
