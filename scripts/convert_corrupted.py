@@ -193,9 +193,36 @@ def process_file(args: tuple) -> tuple:
     处理单个文件
 
     Returns:
-        (input_path, success, output_path_or_error)
+        (input_path, success, output_path_or_error, action)
+        action: 'converted', 'deleted_short', 'deleted_invalid', 'failed'
     """
-    input_path, output_dir, keep_structure = args
+    input_path, output_dir, keep_structure, min_duration = args
+
+    # 检查输入文件是否存在
+    if not os.path.exists(input_path):
+        return (input_path, False, "File not found", 'failed')
+
+    # 获取音频信息
+    info = get_audio_info(input_path)
+
+    # 检查时长是否有效
+    duration = info.get('duration') if info else None
+    if duration is None or duration == 'N/A':
+        LOGGER.warning(f"Invalid duration for {input_path}, deleting")
+        try:
+            os.remove(input_path)
+            return (input_path, True, "Invalid duration (N/A), deleted", 'deleted_invalid')
+        except Exception as e:
+            return (input_path, False, f"Failed to delete invalid file: {e}", 'failed')
+
+    # 检查时长是否太短
+    if min_duration is not None and duration < min_duration:
+        LOGGER.warning(f"Duration {duration:.2f}s < {min_duration}s, deleting: {input_path}")
+        try:
+            os.remove(input_path)
+            return (input_path, True, f"Too short ({duration:.2f}s < {min_duration}s), deleted", 'deleted_short')
+        except Exception as e:
+            return (input_path, False, f"Failed to delete short file: {e}", 'failed')
 
     # 确定输出路径
     if output_dir is None:
@@ -211,20 +238,13 @@ def process_file(args: tuple) -> tuple:
         base_name = Path(input_path).stem
         output_path = os.path.join(output_dir, f"{base_name}.wav")
 
-    # 检查输入文件是否存在
-    if not os.path.exists(input_path):
-        return (input_path, False, "File not found")
-
-    # 获取音频信息
-    info = get_audio_info(input_path)
-
     # 转换文件
     success = convert_to_wav(input_path, str(output_path), info)
 
     if success:
-        return (input_path, True, str(output_path))
+        return (input_path, True, str(output_path), 'converted')
     else:
-        return (input_path, False, "Conversion failed")
+        return (input_path, False, "Conversion failed", 'failed')
 
 
 def main():
@@ -256,6 +276,12 @@ def main():
         action="store_true",
         help="Print what would be done without actually converting"
     )
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=None,
+        help="Minimum duration in seconds. Files shorter than this will be deleted (default: keep all)"
+    )
     args = parser.parse_args()
 
     # 解析损坏文件列表
@@ -278,30 +304,41 @@ def main():
 
     # 准备处理参数
     process_args = [
-        (fp, args.output_dir, args.keep_structure)
+        (fp, args.output_dir, args.keep_structure, args.min_duration)
         for fp in corrupted_files
     ]
 
     # 并行处理
-    success_count = 0
+    converted_count = 0
+    deleted_short_count = 0
+    deleted_invalid_count = 0
     failed_files = []
 
     LOGGER.info(f"Starting conversion with {args.workers} workers...")
+    if args.min_duration:
+        LOGGER.info(f"Files shorter than {args.min_duration}s will be deleted")
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(process_file, arg): arg[0] for arg in process_args}
 
         for future in tqdm.tqdm(as_completed(futures), total=len(process_args), desc="Converting"):
-            input_path, success, result = future.result()
+            input_path, _, result, action = future.result()
 
-            if success:
-                success_count += 1
-            else:
+            if action == 'converted':
+                converted_count += 1
+            elif action == 'deleted_short':
+                deleted_short_count += 1
+            elif action == 'deleted_invalid':
+                deleted_invalid_count += 1
+            elif action == 'failed':
                 failed_files.append((input_path, result))
-                LOGGER.error(f"Failed to convert: {input_path} - {result}")
+                LOGGER.error(f"Failed: {input_path} - {result}")
 
     # 打印总结
-    LOGGER.info(f"Conversion complete: {success_count}/{len(corrupted_files)} successful")
+    LOGGER.info(f"Complete: {converted_count} converted, "
+                f"{deleted_short_count} deleted (too short), "
+                f"{deleted_invalid_count} deleted (invalid duration), "
+                f"{len(failed_files)} failed")
 
     if failed_files:
         # 确定失败列表文件保存位置
