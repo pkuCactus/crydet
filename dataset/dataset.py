@@ -316,7 +316,7 @@ class CryDataset(Dataset):
         file_infos.sort(key=lambda x: x[0])
         return file_infos
 
-    def _get_file_schedule(self, file_infos: List[Tuple[str, float]]) -> List[Tuple[str, float, float, bool]]:
+    def _get_file_schedule(self, file_infos: List[Tuple[str, float]], skip_short: bool = True) -> List[Tuple[str, float, float, bool]]:
         """
         Generate file schedule list for sampling
 
@@ -333,7 +333,7 @@ class CryDataset(Dataset):
         stride = self.config.stride
 
         for file_path, duration in file_infos:
-            if duration < MIN_DURATION:
+            if skip_short and duration < MIN_DURATION:
                 LOGGER.warning(f"Skipping {file_path} due to short duration ({duration:.3f}s)")
                 continue
 
@@ -343,7 +343,7 @@ class CryDataset(Dataset):
                 continue
 
             # Long file: slice with random start position
-            current_pos = random.random() * (duration - slice_len)
+            current_pos = random.random()
             while current_pos + slice_len <= duration:
                 file_schedules.append((file_path, current_pos, slice_len, False))
                 current_pos += stride
@@ -362,7 +362,7 @@ class CryDataset(Dataset):
             dir_list = dir_list[1:] if label != 'cry' else dir_list
             file_infos = []
             for dir_ in dir_list:
-                file_infos.extend(self._get_file_infos(dir_))
+                file_infos.extend(self._get_file_infos(dir_, skip_short=(label=='cry')))
             file_schedule_dict[label] = self._get_file_schedule(file_infos)
             if not file_schedule_dict[label]:
                 raise ValueError(f"No valid audio files found for label '{label}' in directories: {dir_list}")
