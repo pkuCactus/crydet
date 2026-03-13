@@ -33,13 +33,13 @@ def parse_corrupted_list(input_file: str) -> list:
         for line in f:
             line = line.strip()
             # 跳过注释和空行
-            if not line or line.startswith('#'):
+            if not line or line.startswith('#') or line.startswith('  '):
                 continue
             # 处理 "文件路径\t错误信息" 格式
-            if '\t' in line:
+            if line.startswith("/"):
                 file_path = line.split('\t')[0]
             else:
-                file_path = line
+                raise ValueError(f"Unrecognized start {line}")
             corrupted_files.append(file_path)
 
     return corrupted_files
