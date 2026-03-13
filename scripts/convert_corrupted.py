@@ -9,10 +9,12 @@ Usage:
 """
 
 import argparse
+import atexit
 import logging
 import os
 import re
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -23,6 +25,31 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 LOGGER = logging.getLogger(__name__)
+
+
+def restore_terminal():
+    """恢复终端 echo 设置（防止 ffmpeg 等程序关闭 echo）"""
+    try:
+        import termios
+        import tty
+        # 恢复终端到正常模式
+        fd = sys.stdin.fileno()
+        if os.isatty(fd):
+            tty.setcbreak(fd)
+            # 或者使用更安全的方式：
+            # termios.tcsetattr(fd, termios.TCSADRAIN, termios.tcgetattr(fd))
+    except (ImportError, OSError):
+        pass
+
+    # 使用 stty 确保 echo 开启
+    try:
+        subprocess.run(['stty', 'echo'], check=False, capture_output=True)
+    except Exception:
+        pass
+
+
+# 注册退出时恢复终端
+atexit.register(restore_terminal)
 
 
 def parse_corrupted_list(input_file: str) -> list:
@@ -63,7 +90,8 @@ def get_audio_info(file_path: str) -> dict:
         ]
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30
+            cmd, capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL  # 防止修改终端设置
         )
 
         if result.returncode != 0:
@@ -136,7 +164,8 @@ def convert_to_wav(input_path: str, output_path: str, info: dict = None) -> bool
 
         # 执行转换
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
+            cmd, capture_output=True, text=True, timeout=120,
+            stdin=subprocess.DEVNULL  # 防止修改终端设置
         )
 
         if result.returncode != 0:
