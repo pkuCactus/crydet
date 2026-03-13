@@ -198,7 +198,10 @@ def process_file(args: tuple) -> tuple:
     input_path, output_dir, keep_structure = args
 
     # 确定输出路径
-    if keep_structure:
+    if output_dir is None:
+        # 未指定输出目录，保存到原始目录
+        output_path = Path(input_path).with_suffix('.wav')
+    elif keep_structure:
         # 保持目录结构
         rel_path = Path(input_path).name
         output_path = os.path.join(output_dir, rel_path)
@@ -234,8 +237,8 @@ def main():
     )
     parser.add_argument(
         "-o", "--output-dir",
-        default="converted",
-        help="Output directory for converted WAV files (default: converted/)"
+        default=None,
+        help="Output directory for converted WAV files (default: save to original directory)"
     )
     parser.add_argument(
         "-w", "--workers",
@@ -301,8 +304,13 @@ def main():
     LOGGER.info(f"Conversion complete: {success_count}/{len(corrupted_files)} successful")
 
     if failed_files:
-        failed_list_file = os.path.join(args.output_dir, "failed_conversions.txt")
-        os.makedirs(args.output_dir, exist_ok=True)
+        # 确定失败列表文件保存位置
+        if args.output_dir:
+            failed_list_file = os.path.join(args.output_dir, "failed_conversions.txt")
+            os.makedirs(args.output_dir, exist_ok=True)
+        else:
+            failed_list_file = "failed_conversions.txt"
+
         with open(failed_list_file, 'w', encoding='utf-8') as f:
             f.write(f"# Failed Conversions - {len(failed_files)} files\n\n")
             for file_path, error in failed_files:
