@@ -7,51 +7,51 @@
 ```mermaid
 flowchart TD
     subgraph DataLoading["数据读取阶段"]
-        A[CryDataset<br/>__getitem__] --> B[加载音频片段<br/>AudioReader.load_by_time]
-        B --> C[需要补全?]
-        C -->|是| D[填充/截断<br/>pad_pcm]
-        C -->|否| E[原始波形]
-        D --> F[AudioAugmenter.augment]
+        A["CryDataset\n__getitem__"] --> B["加载音频片段\nAudioReader.load_by_time"]
+        B --> C{需要补全?}
+        C -->|是| D["填充/截断\npad_pcm"]
+        C -->|否| E["原始波形"]
+        D --> F["AudioAugmenter.augment"]
         E --> F
     end
 
     subgraph Augmentation["数据增强阶段"]
         F --> G{标签判断}
-        G -->|非Cry| H[50%概率<br/>时间反转]
-        G -->|Cry| I[保持原样]
+        G -->|非Cry| H["50%概率\n时间反转"]
+        G -->|Cry| I["保持原样"]
         H --> J{Mixup位置}
         I --> J
 
-        J -->|70%概率前置| K[Mixup增强<br/>do_mixup]
-        J -->|30%概率后置| L[跳过]
+        J -->|70%概率前置| K["Mixup增强\ndo_mixup"]
+        J -->|30%概率后置| L["跳过"]
         K --> M{Sox效果链?}
         L --> M
 
-        M -->|Cry: 90%| N[Sox效果链]
+        M -->|Cry: 90%| N["Sox效果链"]
         M -->|非Cry: 60%| N
-        M -->|不增强| O[跳过效果链]
+        M -->|不增强| O["跳过效果链"]
 
-        N --> P[Pitch 50%]
-        P --> Q[Reverb 80%]
-        Q --> R[Phaser 50%]
+        N --> P["Pitch 50%"]
+        P --> Q["Reverb 80%"]
+        Q --> R["Phaser 50%"]
         R --> S{非Cry?}
-        S -->|是| T[Echo 50%]
-        S -->|否| U[跳过Echo]
-        T --> V[噪声注入 10%]
+        S -->|是| T["Echo 50%"]
+        S -->|否| U["跳过Echo"]
+        T --> V["噪声注入 10%"]
         U --> V
         O --> V
 
         V --> W{Mixup后置?}
-        W -->|是| X[Mixup增强]
-        W -->|否| Y[跳过]
-        X --> Z[动态增益调整]
+        W -->|是| X["Mixup增强"]
+        W -->|否| Y["跳过"]
+        X --> Z["动态增益调整"]
         Y --> Z
     end
 
     subgraph Output["输出阶段"]
-        Z --> AA[增强后波形<br/>5s @ 16kHz]
-        AA --> AB[特征提取<br/>FeatureExtractor]
-        AB --> AC[模型训练输入<br/>[T, F]]
+        Z --> AA["增强后波形\n5s @ 16kHz"]
+        AA --> AB["特征提取\nFeatureExtractor"]
+        AB --> AC["模型训练输入\nT, F"]
     end
 
     style DataLoading fill:#e1f5fe,stroke:#0277bd
@@ -110,7 +110,7 @@ sequenceDiagram
 
     Note over A: Step 6: 动态增益(90%概率)
     alt 90%概率
-        A->>A: 增益调整<br/>90%: 高斯衰减<br/>10%: 小幅增益
+        A->>A: 增益调整\n90%: 高斯衰减\n10%: 小幅增益
     end
 
     A-->>D: 增强后波形
@@ -129,15 +129,15 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[do_mixup<br/>y, label] --> B{标签判断}
+    A["do_mixup\ny, label"] --> B{标签判断}
 
-    B -->|Cry| C[Mixup率<br/>N0.3, 0.15<br/>裁剪0.1-0.65]
-    B -->|非Cry| D[Mixup率<br/>均匀随机<br/>0.0-1.0]
+    B -->|Cry| C["Mixup率\nN0.3, 0.15\n裁剪0.1-0.65"]
+    B -->|非Cry| D["Mixup率\n均匀随机\n0.0-1.0"]
 
     C --> E[选择混合样本]
-    D --> F[选择混合样本<br/>仅非Cry]
+    D --> F["选择混合样本\n仅非Cry"]
 
-    E --> G[从file_schedule_dict<br/>随机加载音频片段]
+    E --> G["从file_schedule_dict\n随机加载音频片段"]
     F --> G
 
     G --> H{Cry样本?}
@@ -146,12 +146,12 @@ flowchart TD
 
     I --> K[计算dB差]
     K --> L{mix_db >= original_db?}
-    L -->|是| M[降低mix能量<br/>目标差3-10dB]
+    L -->|是| M["降低mix能量\n目标差3-10dB"]
     L -->|否| J
     M --> J
 
-    J --> N[随机位置混合<br/>y[st:st+len] += y_mix]
-    N --> O[Clip限幅<br/>-1, 1]
+    J --> N["随机位置混合\ny[st:st+len] += y_mix"]
+    N --> O["Clip限幅\n-1, 1"]
     O --> P[返回增强波形]
 
     style A fill:#e1f5fe,stroke:#0277bd
@@ -269,19 +269,19 @@ flowchart TB
     subgraph Cry["Cry 样本 (婴儿哭声)"]
         direction TB
         C1[时间反转: ❌ 不应用]
-        C2[Mixup: ✅ 30%概率<br/>混合率: N(0.3, 0.15)<br/>能量约束: 混合样本低3-10dB]
-        C3[Sox效果链: ✅ 90%概率<br/>Pitch → Reverb → Phaser<br/>❌ 不包含Echo]
+        C2["Mixup: ✅ 30%概率\n混合率: N(0.3, 0.15)\n能量约束: 混合样本低3-10dB"]
+        C3["Sox效果链: ✅ 90%概率\nPitch → Reverb → Phaser\n❌ 不包含Echo"]
         C4[噪声注入: 10%概率 SNR 10-30dB]
-        C5[动态增益: 90%概率<br/>模拟不同距离/音量]
+        C5["动态增益: 90%概率\n模拟不同距离/音量"]
 
         C1 --> C2 --> C3 --> C4 --> C5
     end
 
     subgraph NonCry["非Cry 样本 (环境/其他声音)"]
         direction TB
-        N1[时间反转: ✅ 50%概率<br/>增加时间不变性]
-        N2[Mixup: ✅ 30%概率<br/>混合率: 均匀随机<br/>约束: 仅非Cry样本]
-        N3[Sox效果链: ✅ 60%概率<br/>Pitch → Reverb → Phaser<br/>✅ 包含Echo]
+        N1["时间反转: ✅ 50%概率\n增加时间不变性"]
+        N2["Mixup: ✅ 30%概率\n混合率: 均匀随机\n约束: 仅非Cry样本"]
+        N3["Sox效果链: ✅ 60%概率\nPitch → Reverb → Phaser\n✅ 包含Echo"]
         N4[噪声注入: 10%概率]
         N5[动态增益: 90%概率]
 
