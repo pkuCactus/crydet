@@ -75,3 +75,14 @@ training:
   log_interval: 10             # Log every N batches
   val_interval: 1              # Validate every N epochs
   save_best_only: true         # Only save best model
+
+  # Loss function configuration
+  loss:
+    loss_type: combined         # Options: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce', 'ohem_combined'
+    focal_alpha: 0.25           # Focal loss alpha parameter
+    focal_gamma: 2.0            # Focal loss gamma parameter
+    label_smoothing: 0.1        # Label smoothing factor
+    focal_weight: 0.5           # Weight for focal loss in combined mode
+    # OHEM parameters (used when loss_type starts with 'ohem_')
+    ohem_hard_ratio: 0.25       # Ratio of hard examples to keep
+    ohem_min_hard_num: 4        # Minimum number of hard examples per batch

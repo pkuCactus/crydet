@@ -17,6 +17,7 @@ from .loss import (
     FocalLoss,
     LabelSmoothingCrossEntropy,
     CombinedLoss,
+    OHEMLoss,
     create_loss
 )
 from .ema import ExponentialMovingAverage
@@ -32,7 +33,7 @@ __all__ = [
     'create_model', 'create_model_from_variant',
     'list_models', 'get_model_info', 'print_model_summary',
     'MODEL_CONFIGS',
-    'FocalLoss', 'LabelSmoothingCrossEntropy', 'CombinedLoss', 'create_loss',
+    'FocalLoss', 'LabelSmoothingCrossEntropy', 'CombinedLoss', 'OHEMLoss', 'create_loss',
     'ExponentialMovingAverage',
     'WarmupCosineScheduler', 'LinearWarmupPolyDecayScheduler',
     'setup_distributed', 'cleanup_distributed',

@@ -58,6 +58,27 @@ def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
 
 
 @dataclass
+class LossConfig:
+    """Loss function configuration"""
+    # Loss type: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce'
+    loss_type: str = 'combined'
+
+    # Focal loss parameters
+    focal_alpha: float = 0.25
+    focal_gamma: float = 2.0
+
+    # Label smoothing parameters
+    label_smoothing: float = 0.1
+
+    # Combined loss weight
+    focal_weight: float = 0.5
+
+    # OHEM parameters (used when loss_type starts with 'ohem_')
+    ohem_hard_ratio: float = 0.25  # Ratio of hard examples to keep
+    ohem_min_hard_num: int = 4  # Minimum number of hard examples per batch
+
+
+@dataclass
 class MixupConfig:
     """Mixup augmentation configuration"""
     cry_mix_prob: float = 0.3
@@ -363,10 +384,8 @@ class TrainingConfig:
     min_lr: float = 1e-6
     lr_decay_epochs: int = 0  # For cosine_warmup: epochs for cosine decay after warmup (0 = auto)
 
-    # Loss settings
-    use_focal_loss: bool = True
-    focal_alpha: float = 0.25
-    focal_gamma: float = 2.0
+    # Loss configuration
+    loss: LossConfig = field(default_factory=LossConfig)
 
     # SpecAugment settings
     use_spec_augment: bool = True
@@ -386,9 +405,9 @@ class TrainingConfig:
 @dataclass
 class Config:
     """Main configuration container"""
-    feature: FeatureConfig = field(default_factory=FeatureConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
+    feature: FeatureConfig = field(default_factory=FeatureConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
 

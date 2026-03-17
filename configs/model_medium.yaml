@@ -92,8 +92,8 @@ training:
   num_epochs: 100
   learning_rate: 0.001
   weight_decay: 0.01
-  grad_clip: 1.0
-  early_stopping_patience: 10
+  grad_clip: 5.0
+  early_stopping_patience: 15
   checkpoint_dir: ./checkpoints/medium
   log_dir: ./logs/medium
   use_augmentation: true
@@ -107,16 +107,27 @@ training:
   warmup_steps: 0               # Steps for linear warmup (0 = use warmup_epochs)
   lr_decay_epochs: 0            # Epochs for cosine decay after warmup (0 = auto: total - warmup)
   min_lr: 0.000001
-  use_focal_loss: true
-  focal_alpha: 0.25
-  focal_gamma: 2.0
+
+  # SpecAugment settings
   use_spec_augment: true
   spec_augment_freq_mask: 8
   spec_augment_time_mask: 20
   # SWA (Stochastic Weight Averaging)
+  # Loss function configuration
+  loss:
+    loss_type: combined         # Options: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce', 'ohem_combined'
+    focal_alpha: 0.25           # Focal loss alpha parameter
+    focal_gamma: 2.0            # Focal loss gamma parameter
+    label_smoothing: 0.1        # Label smoothing factor
+    focal_weight: 0.5           # Weight for focal loss in combined mode
+    # OHEM parameters (used when loss_type starts with 'ohem_')
+    ohem_hard_ratio: 0.25       # Ratio of hard examples to keep
+    ohem_min_hard_num: 4        # Minimum number of hard examples per batch
+
+  # SWA (Stochastic Weight Averaging)
   use_swa: true
   swa_start: 50
-  swa_lr: 1e-5
+  swa_lr: 5e-5
 
   # EMA (Exponential Moving Average)
   use_ema: true                 # Enable EMA for model parameter averaging

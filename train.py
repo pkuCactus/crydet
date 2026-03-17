@@ -45,8 +45,8 @@ from dataset.dataset import CryDataset
 from dataset.dataloader import collate_fn, worker_init_fn, load_data_dict
 from dataset.sampler import CrySampler, DistributedCrySampler, SequentialCrySampler
 from model import create_model, print_model_summary
-from model.loss import CombinedLoss
 from model.ema import ExponentialMovingAverage
+from model.loss import create_loss
 from model.scheduler import WarmupCosineScheduler
 from model.distributed import setup_distributed, cleanup_distributed
 from utils import setup_logger
@@ -148,15 +148,17 @@ class Trainer:
             self.best_val_f1 = checkpoint['best_val_f1']
 
     def _create_loss(self) -> nn.Module:
-        """Create loss function."""
-        if self.train_cfg.use_focal_loss:
-            return CombinedLoss(
-                alpha=self.train_cfg.focal_alpha,
-                gamma=self.train_cfg.focal_gamma,
-                label_smoothing=self.model_cfg.label_smoothing,
-                focal_weight=0.5
-            )
-        return nn.CrossEntropyLoss(label_smoothing=self.model_cfg.label_smoothing)
+        """Create loss function from configuration."""
+        loss_cfg = self.train_cfg.loss
+        return create_loss(
+            loss_type=loss_cfg.loss_type,
+            alpha=loss_cfg.focal_alpha,
+            gamma=loss_cfg.focal_gamma,
+            label_smoothing=loss_cfg.label_smoothing,
+            focal_weight=loss_cfg.focal_weight,
+            ohem_hard_ratio=loss_cfg.ohem_hard_ratio,
+            ohem_min_hard_num=loss_cfg.ohem_min_hard_num
+        )
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer."""
