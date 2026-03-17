@@ -287,15 +287,18 @@ class AudioAugmenter:
             }
             tfm.echo(**params)
         elif effect_name == 'time_stretch':
-            factor = random.uniform(0.8, 1.2)
-            # stretch: SOLA, good for 0.9-1.1; tempo: WSOLA good for (0.5, 0.9) and (1.1, inf)
-            if 0.9 <= factor <= 1.1:
+            # duration_factor: <1=shorten(faster), >1=lengthen(slower)
+            duration_factor = random.uniform(0.8, 1.2)
+            # stretch: SOLA good for slight changes; tempo: WSOLA good for extreme changes
+            if 0.9 <= duration_factor <= 1.1:
                 window = random.uniform(15, 25)
-                tfm.stretch(factor, window=window)
+                tfm.stretch(duration_factor, window=window)
             else:
-                # stretch factor is inverse of tempo factor
-                factor = 1.0 / factor
-                tfm.tempo(factor)
+                # tempo uses speed factor (inverse of duration factor)
+                speed_factor = 1.0 / duration_factor
+                if 0.9 <= speed_factor <= 1.1:
+                    speed_factor = 1.11
+                tfm.tempo(speed_factor)
             tfm.set_output_format(rate=self.sample_rate, channels=1)
 
     def _apply_effect_group(self, y: np.ndarray, effects: List[str]) -> np.ndarray:
