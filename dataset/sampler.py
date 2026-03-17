@@ -20,9 +20,17 @@ class CrySampler(Sampler):
         self.cry_rate = cry_rate
         self.data_source = data_source
         self.shuffle = shuffle
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set epoch and rebuild schedule for shuffling."""
+        self.epoch = epoch
+        self.data_source.build_schedule(self.shuffle, seed=epoch)
 
     def __iter__(self) -> Iterator[tuple[str, int]]:
-        self.data_source.build_schedule(self.shuffle)
+        # Ensure schedule is built (set_epoch may not be called in single GPU)
+        if not self.data_source.file_schedule_dict:
+            self.data_source.build_schedule(self.shuffle, seed=self.epoch)
         label_idx_map = {label: 0 for label in self.data_source.label_schedule_count}
         non_cry_labels = [l for l in label_idx_map if l != 'cry']
 
