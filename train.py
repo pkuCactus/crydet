@@ -49,7 +49,7 @@ from model.ema import ExponentialMovingAverage
 from model.loss import create_loss
 from model.scheduler import WarmupCosineScheduler
 from model.distributed import setup_distributed, cleanup_distributed
-from utils import setup_logger
+from utils import setup_logger, get_logger
 
 
 class Trainer:
@@ -117,7 +117,8 @@ class Trainer:
         # Scaler for mixed precision
         self.scaler = torch.amp.GradScaler() if device.type == 'cuda' else None
 
-        self.logger = setup_logger(rank)
+        # Use root logger (configured in main) - inherits handlers from root
+        self.logger = get_logger(__name__)
 
         # Restore from checkpoint if provided
         if checkpoint is not None:
@@ -613,7 +614,8 @@ def main():
 
     # Setup distributed training
     rank, world_size, device = setup_distributed()
-    logger = setup_logger(rank)
+    # Configure root logger - all modules will inherit this config
+    logger = setup_logger(rank, name=None)
 
     try:
         # Load config
