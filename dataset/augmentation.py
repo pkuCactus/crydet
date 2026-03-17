@@ -180,17 +180,23 @@ class AudioAugmenter:
         # do other augment
         is_aug = self.is_augment(label)
         y_aug = np.copy(y)
-        tfm = sox.transform.Transformer()
 
         if is_aug:
-            chain = ['pitch', 'reverb', 'phaser', 'time_stretch']
+            # Select effects first, then apply in pairs for memory efficiency
+            available = ['pitch', 'reverb', 'phaser', 'time_stretch']
             if not is_cry:
-                chain.append('echo')
-            random.shuffle(chain)
-            for effect_name in chain:
-                if random.random() < self.config[effect_name]:
-                    self._apply_effect(tfm, effect_name)
-            y_aug = tfm.build_array(input_array=y, sample_rate_in=self.sample_rate)
+                available.append('echo')
+
+            selected = [e for e in available if random.random() < self.config[e]]
+
+            # Apply effects: split into two groups only if more than 3 effects
+            if len(selected) <= 3:
+                y_aug = self._apply_effect_group(y_aug, selected)
+            else:
+                mid = len(selected) // 2
+                y_aug = self._apply_effect_group(y_aug, selected[:mid])
+                y_aug = self._apply_effect_group(y_aug, selected[mid:])
+
             y_aug = utils.pad_pcm(y_aug, y.shape[0], 1, 0)
             if random.random() < self.config.noise_prob:
                 self._apply_noise(y_aug)
@@ -283,6 +289,25 @@ class AudioAugmenter:
         elif effect_name == 'time_stretch':
             factor = random.uniform(0.8, 1.2)
             tfm.tempo(factor)
+
+    def _apply_effect_group(self, y: np.ndarray, effects: List[str]) -> np.ndarray:
+        """
+        Apply a group of effects to audio.
+
+        Args:
+            y: Input audio waveform
+            effects: List of effect names to apply
+
+        Returns:
+            Processed audio waveform (returns original if effects is empty)
+        """
+        if not effects:
+            return y
+
+        tfm = sox.transform.Transformer()
+        for effect_name in effects:
+            self._apply_effect(tfm, effect_name)
+        return tfm.build_array(input_array=y, sample_rate_in=self.sample_rate)
 
     def _do_mixup(self, y: np.ndarray, label: Optional[str] = None) -> np.ndarray:
         y_mix = self._generate_mixup_sample(y, label)
