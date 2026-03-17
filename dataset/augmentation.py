@@ -10,7 +10,7 @@ import librosa
 import numpy as np
 import sox
 
-from config import AugmentationConfig
+from utils.config import AugmentationConfig
 from dataset.audio_reader import AudioReader
 from dataset import utils
 
@@ -48,6 +48,9 @@ class AudioAugmenter:
         # 每次使用时替换池中样本的概率，保持多样性
         self._refresh_prob = 0.1
 
+        # Preload ambient noise files if configured
+        self._ambient_noise_files = self._load_ambient_noise_files()
+
     @property
     def audio_reader(self) -> Optional['AudioReader']:
         """Get the audio reader instance"""
@@ -75,6 +78,66 @@ class AudioAugmenter:
         self._file_schedule_dict = value
         self._pool_initialized = False
         self._mixup_pool.clear()
+
+    def _load_ambient_noise_files(self) -> List[str]:
+        """
+        Load list of ambient noise files from config.
+
+        Returns:
+            List of ambient noise file paths
+        """
+        noise_config = self.config.noise
+
+        # If explicit file list is provided, use it
+        if noise_config.ambient_noise_files:
+            return list(noise_config.ambient_noise_files)
+
+        # If directory is provided, scan for audio files
+        if noise_config.ambient_noise_dir:
+            from pathlib import Path
+
+            noise_dir = Path(noise_config.ambient_noise_dir)
+            if noise_dir.exists() and noise_dir.is_dir():
+                audio_exts = ('.wav', '.mp3', '.flac', '.ogg', '.m4a')
+                files = [
+                    str(f) for f in noise_dir.rglob('*')
+                    if f.suffix.lower() in audio_exts
+                ]
+                return files
+
+        return []
+
+    def _select_noise_type(self) -> str:
+        """
+        Select noise type based on configured probabilities.
+
+        Returns:
+            Selected noise type ('white', 'pink', 'ambient')
+        """
+        noise_config = self.config.noise
+
+        # Build weighted list of noise types
+        weights = []
+        types = []
+
+        if noise_config.white_noise_prob > 0:
+            weights.append(noise_config.white_noise_prob)
+            types.append('white')
+        if noise_config.pink_noise_prob > 0:
+            weights.append(noise_config.pink_noise_prob)
+            types.append('pink')
+        if noise_config.ambient_noise_prob > 0 and self._ambient_noise_files:
+            weights.append(noise_config.ambient_noise_prob)
+            types.append('ambient')
+
+        if not types:
+            return 'white'  # Default fallback
+
+        # Normalize weights and select
+        total = sum(weights)
+        weights = [w / total for w in weights]
+
+        return random.choices(types, weights=weights, k=1)[0]
 
     def _init_pool(self):
         """Initialize mixup pool with preloaded samples (lazy initialization)"""
@@ -120,7 +183,7 @@ class AudioAugmenter:
         tfm = sox.transform.Transformer()
 
         if is_aug:
-            chain = ['pitch', 'reverb', 'phaser']
+            chain = ['pitch', 'reverb', 'phaser', 'time_stretch']
             if not is_cry:
                 chain.append('echo')
             random.shuffle(chain)
@@ -130,8 +193,7 @@ class AudioAugmenter:
             y_aug = tfm.build_array(input_array=y, sample_rate_in=self.sample_rate)
             y_aug = utils.pad_pcm(y_aug, y.shape[0], 1, 0)
             if random.random() < self.config.noise_prob:
-                snr = random.random() * 20 + 10
-                y_aug = utils.add_noise(y_aug, snr=snr)
+                self._apply_noise(y_aug)
             y_aug = utils.gain(y_aug, utils.get_db(y), abs=True)
 
         if not is_mixup_front:
@@ -155,10 +217,40 @@ class AudioAugmenter:
             return aug_prob < self.config.cry_aug_prob
         return aug_prob < self.config.other_aug_prob
 
+    def _apply_noise(self, y: np.ndarray) -> np.ndarray:
+        """
+        Apply noise to audio signal based on noise configuration.
+
+        Args:
+            y: Input audio waveform (modified in-place)
+
+        Returns:
+            Noisy audio waveform
+        """
+        noise_config = self.config.noise
+
+        # Select noise type
+        noise_type = self._select_noise_type()
+
+        # Random SNR within configured range
+        snr = random.uniform(noise_config.snr_min, noise_config.snr_max)
+
+        # Apply selected noise type
+        if noise_type == 'pink':
+            alpha = noise_config.pink_noise_alpha
+            return utils.add_pink_noise(y, snr=snr, alpha=alpha)
+        elif noise_type == 'ambient' and self._ambient_noise_files:
+            return utils.add_ambient_noise(
+                y, self._ambient_noise_files, snr=snr, sample_rate=self.sample_rate
+            )
+        else:
+            # Default to white noise
+            return utils.add_noise(y, snr=int(snr))
+
     def _apply_effect(self, tfm: sox.transform.Transformer, effect_name: str) -> None:
         """Apply a single audio effect to the transformer"""
         if effect_name == 'pitch':
-            pitch_rate = (random.random() - 0.5) * 4
+            pitch_rate = (random.random() - 0.5) * 8
             tfm.pitch(n_semitones=pitch_rate)
         elif effect_name == 'reverb':
             params = {
@@ -188,6 +280,9 @@ class AudioAugmenter:
                 'decays': [random.random() * 0.5]
             }
             tfm.echo(**params)
+        elif effect_name == 'time_stretch':
+            rate = random.uniform(0.8, 1.2)
+            tfm.rate(rate)
 
     def _do_mixup(self, y: np.ndarray, label: Optional[str] = None) -> np.ndarray:
         y_mix = self._generate_mixup_sample(y, label)

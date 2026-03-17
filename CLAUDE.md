@@ -11,7 +11,9 @@ Baby Cry Detection - Audio classification system to detect whether audio contain
 
 ```
 crydet/
-├── config.py              # Configuration dataclasses (FeatureConfig, DatasetConfig, AugmentationConfig, ModelConfig, TrainingConfig)
+├── utils/
+│   ├── config.py          # Configuration dataclasses (FeatureConfig, DatasetConfig, AugmentationConfig, ModelConfig, TrainingConfig)
+│   └── logger.py          # Logging utilities for distributed training
 ├── configs/
 │   ├── default.yaml       # Default YAML configuration
 │   ├── model_large.yaml   # High-performance config (d_model=512, n_layers=12)
@@ -21,6 +23,9 @@ crydet/
 │   ├── transformer.py     # CryTransformer with Linear projection (NOT Conv1d)
 │   ├── layers.py          # Attention variants (standard/linear/depthwise), FFN variants
 │   ├── loss.py            # FocalLoss, LabelSmoothingCrossEntropy, CombinedLoss
+│   ├── ema.py             # Exponential Moving Average
+│   ├── scheduler.py       # Warmup + Cosine Decay scheduler
+│   ├── distributed.py     # Distributed training utilities
 │   └── variants.py        # Model factory functions, MODEL_CONFIGS presets
 ├── dataset/
 │   ├── audio_reader.py    # Audio loading with resampling and caching
@@ -28,6 +33,7 @@ crydet/
 │   ├── augmentation.py    # AudioAugmenter with label-aware mixup
 │   ├── feature.py         # FeatureExtractor with FBank + delta features
 │   ├── sampler.py         # CrySampler and DistributedCrySampler
+│   ├── dataloader.py      # DataLoader utilities
 │   └── utils.py           # Audio utilities
 ├── train.py               # Training script with DDP support
 ├── train_ddp.sh           # Multi-GPU training launcher
@@ -157,11 +163,21 @@ DataLoader → Model
 | `fmax` | 8000 | Max frequency for mel filter |
 | `use_delta` | false | Add time delta features (+64 dim) |
 | `use_freq_delta` | false | Add frequency delta features (+64 dim) |
+| `use_db_feature` | false | Add energy (dB) as additional channel (+1 dim) |
+| `use_db_norm` | true | Normalize db features to [0, 1] range |
 
 **Output dimensions:**
 - Base: `[T, 64]`
 - +delta: `[T, 128]`
 - +freq_delta: `[T, 192]`
+- +db: adds 2 channel (e.g., `[T, 65]`, `[T, 129]`, or `[T, 194]`)
+
+**Note on energy features:** The `extract()` method returns db as `(2, frames)` array containing:
+- `db[0]`: Average energy per frame
+- `db[1]`: Hanning-windowed (weighted) energy per frame
+
+When `use_db_feature=True`:
+- Select normalization via `use_db_norm` (default: true, normalized to [0, 1])
 
 ## Model Configuration
 

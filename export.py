@@ -30,7 +30,6 @@ import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import load_config
 from model import create_model, get_model_info, print_model_summary
 from model.transformer import CryTransformer
 

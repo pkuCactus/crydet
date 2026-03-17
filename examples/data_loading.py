@@ -15,7 +15,7 @@ import soundfile as sf
 
 from dataset.dataset import CryDataset
 from dataset.sampler import CrySampler
-from config import load_config
+from utils.config import load_config
 
 
 def save_samples_to_temp(dataset, output_dir: str = 'temp', num_samples: int = 100, sample_rate: int = 16000):

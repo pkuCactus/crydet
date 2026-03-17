@@ -19,7 +19,7 @@ from .audio_reader import AudioReader
 from .augmentation import AudioAugmenter
 from .feature import FeatureExtractor
 from .utils import pad_pcm
-from config import DatasetConfig, AugmentationConfig, FeatureConfig
+from utils.config import DatasetConfig, AugmentationConfig, FeatureConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
 # Default minimum energy threshold for cry samples (in dB, relative to max)

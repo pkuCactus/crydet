@@ -14,7 +14,7 @@ import soundfile as sf
 
 from dataset.feature import FeatureExtractor
 from dataset.audio_reader import AudioReader
-from config import load_config, FeatureConfig
+from utils.config import load_config, FeatureConfig
 
 
 def extract_features_from_file(

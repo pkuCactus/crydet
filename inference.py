@@ -25,7 +25,6 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import Config, load_config
 from dataset.audio_reader import AudioReader
 from dataset.feature import FeatureExtractor
 from model import create_model

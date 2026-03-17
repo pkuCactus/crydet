@@ -25,7 +25,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import ModelConfig
+from utils.config import ModelConfig
 from model import create_model, list_models, get_model_info, print_model_summary, create_model_from_variant, MODEL_CONFIGS
 
 

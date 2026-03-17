@@ -7,12 +7,13 @@ feature:
   n_mels: 64
   n_fft: 1024
   hop_length: 500
-  fmin: 250
-  fmax: 8000
+  fmin: 200
+  fmax: 8500
   preemphasis: 0.95
   use_fbank_norm: true
-  use_delta: false
-  use_freq_delta: false
+  use_delta: true
+  use_freq_delta: true
+  use_db_feature: true
 
 # Dataset settings
 dataset:
@@ -21,7 +22,7 @@ dataset:
   sample_rate: 16000
   slice_len: 5.0
   stride: 3.0
-  cry_rate: 0.5
+  cry_rate: 0.4
   cache_dir: ./audio_cache
   force_mono: true
 
@@ -33,14 +34,24 @@ augmentation:
     cry_mix_rate_std: 0.15
     other_mix_prob: 0.3
     mix_front_prob: 0.7
-  cry_aug_prob: 0.9
+  # Noise augmentation configuration
+  noise:
+    white_noise_prob: 0.3      # White noise weight
+    pink_noise_prob: 0.5       # Pink noise weight (more natural sounding)
+    ambient_noise_prob: 0.2    # Ambient/environmental noise weight
+    snr_min: 5.0               # Minimum SNR in dB
+    snr_max: 25.0              # Maximum SNR in dB
+    pink_noise_alpha: 1.0      # Pink noise spectral decay (1.0 = classic pink)
+    ambient_noise_dir: null    # Directory with ambient noise files (null to disable)
+    ambient_noise_files: []    # List of specific ambient noise files
+  cry_aug_prob: 0.6
   other_aug_prob: 0.6
   other_reverse_prob: 0.5
-  pitch_prob: 0.5
+  pitch_prob: 0.7
   reverb_prob: 0.8
   phaser_prob: 0.5
   echo_prob: 0.5
-  noise_prob: 0.1
+  noise_prob: 0.15            # Probability of applying noise augmentation
   gain_prob: 0.9
 
 # Model settings
@@ -64,11 +75,11 @@ model:
 
   # Attention and FFN types: 'standard', 'linear', 'depthwise', 'inverted_bottleneck', or 'auto'
   # When set to 'auto', efficient variants are selected for smaller models
-  attention_type: auto
+  attention_type: linear
   ffn_type: auto
 
   # Pooling: 'mean', 'max', 'attention'
-  pool_type: mean
+  pool_type: attention
 
   # Label smoothing for training
   label_smoothing: 0.1
@@ -91,8 +102,10 @@ training:
   val_interval: 1
   save_best_only: true
   optimizer: adamw
-  scheduler: cosine
-  warmup_epochs: 5
+  scheduler: cosine_warmup       # Options: 'cosine_warmup', 'cosine', 'plateau', 'step', 'none'
+  warmup_epochs: 5              # Epochs for linear warmup (used if warmup_steps=0)
+  warmup_steps: 0               # Steps for linear warmup (0 = use warmup_epochs)
+  lr_decay_epochs: 0            # Epochs for cosine decay after warmup (0 = auto: total - warmup)
   min_lr: 0.000001
   use_focal_loss: true
   focal_alpha: 0.25
@@ -100,6 +113,11 @@ training:
   use_spec_augment: true
   spec_augment_freq_mask: 8
   spec_augment_time_mask: 20
-  use_swa: false
-  swa_start: 70
-  swa_lr: 0.0001
+  # SWA (Stochastic Weight Averaging)
+  use_swa: true
+  swa_start: 50
+  swa_lr: 1e-5
+
+  # EMA (Exponential Moving Average)
+  use_ema: true                 # Enable EMA for model parameter averaging
+  ema_decay: 0.9999             # EMA decay rate (closer to 1 = slower update)

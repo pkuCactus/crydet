@@ -68,9 +68,30 @@ class MixupConfig:
 
 
 @dataclass
+class NoiseConfig:
+    """Noise augmentation configuration"""
+    # Noise type probabilities (relative weights, will be normalized)
+    white_noise_prob: float = 0.3
+    pink_noise_prob: float = 0.4
+    ambient_noise_prob: float = 0.3
+
+    # SNR range for noise mixing (in dB)
+    snr_min: float = 5.0
+    snr_max: float = 25.0
+
+    # Ambient noise settings
+    ambient_noise_dir: Optional[str] = None  # Directory containing ambient noise files
+    ambient_noise_files: tuple = field(default_factory=tuple)  # List of ambient noise file paths
+
+    # Pink noise characteristics
+    pink_noise_alpha: float = 1.0  # 1/f^alpha, alpha=1 for classic pink noise
+
+
+@dataclass
 class AugmentationConfig:
     """Data augmentation configuration"""
     mixup: MixupConfig = field(default_factory=MixupConfig)
+    noise: NoiseConfig = field(default_factory=NoiseConfig)
 
     # Augmentation probabilities by label type
     cry_aug_prob: float = 0.9
@@ -123,11 +144,11 @@ class FeatureConfig:
 
     # Normalization
     use_fbank_norm: bool = True
-    use_db_norm: bool = False
     fbank_decay: float = 0.9  # Exponential smoothing decay
 
     # Energy feature
-    db_avg_win: float = 0.0  # Energy averaging window
+    use_db_feature: bool = False  # Add energy (dB) feature as additional channel
+    use_db_norm: bool = False  # Normalize db features to [0, 1] range
 
     # Output configuration
     use_delta: bool = False  # Time delta features
@@ -142,16 +163,6 @@ class FeatureConfig:
             return self.n_fft // 2 + 1
         else:  # fbank or all
             return self.n_mels
-
-    @property
-    def num_channels(self) -> int:
-        """Return number of output channels (including delta features)"""
-        channels = 1
-        if self.use_delta:
-            channels += 1
-        if self.use_freq_delta:
-            channels += 1
-        return channels
 
     @property
     def frames_per_second(self) -> int:
@@ -346,9 +357,11 @@ class TrainingConfig:
 
     # Optimizer settings
     optimizer: str = 'adamw'  # 'adam', 'adamw', 'sgd'
-    scheduler: str = 'cosine'  # 'step', 'cosine', 'plateau', 'none'
+    scheduler: str = 'cosine'  # 'step', 'cosine', 'plateau', 'cosine_warmup', 'none'
     warmup_epochs: int = 5
+    warmup_steps: int = 0  # If > 0, use steps instead of epochs for warmup
     min_lr: float = 1e-6
+    lr_decay_epochs: int = 0  # For cosine_warmup: epochs for cosine decay after warmup (0 = auto)
 
     # Loss settings
     use_focal_loss: bool = True
@@ -364,6 +377,10 @@ class TrainingConfig:
     use_swa: bool = False
     swa_start: int = 70
     swa_lr: float = 1e-4
+
+    # EMA (Exponential Moving Average)
+    use_ema: bool = True
+    ema_decay: float = 0.9999  # EMA decay rate (closer to 1 = slower update)
 
 
 @dataclass

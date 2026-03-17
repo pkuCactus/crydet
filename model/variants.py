@@ -2,9 +2,9 @@
 Model variants and factory functions for CryTransformer
 """
 
-from typing import Optional, Dict
+from typing import Dict
 
-from config import ModelConfig
+from utils.config import ModelConfig
 from model.transformer import CryTransformer, CryTransformerWithSpecAugment
 
 

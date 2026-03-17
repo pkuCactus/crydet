@@ -13,6 +13,8 @@ feature:
   normalize: true              # Normalize features
   use_delta: true              # Add time delta features
   use_freq_delta: true         # Add frequency delta features
+  use_db_feature: false        # Add energy (dB) as additional channel
+  use_db_norm: true            # Normalize db features to [0, 1] range
 
 # Dataset settings
 dataset:

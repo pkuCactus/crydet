@@ -22,15 +22,11 @@ Multi-GPU Usage:
 """
 
 import argparse
-import json
-import logging
 import os
-import random
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,40 +40,16 @@ from torch.utils.tensorboard import SummaryWriter
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import Config, load_config, ModelConfig, TrainingConfig
+from utils.config import Config, load_config
 from dataset.dataset import CryDataset
+from dataset.dataloader import collate_fn, worker_init_fn, load_data_dict
 from dataset.sampler import CrySampler, DistributedCrySampler, SequentialCrySampler
-from model import create_model, get_model_info, print_model_summary
-from model.loss import FocalLoss, LabelSmoothingCrossEntropy, CombinedLoss
-
-
-def setup_logger(rank: int = 0):
-    """Setup logger with rank info for distributed training"""
-    logging.basicConfig(
-        level=logging.INFO if rank == 0 else logging.WARNING,
-        format=f'[Rank {rank}] %(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    return logging.getLogger(__name__)
-
-
-def collate_fn(batch):
-    """Stack features to [B, T, F] and convert labels to indices."""
-    features_list, labels = zip(*batch)
-
-    features = torch.from_numpy(np.stack(features_list)).float()
-    label_to_idx = {'cry': 1, 'other': 0}
-    label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
-
-    return features, label_indices
-
-
-def worker_init_fn(worker_id: int):
-    """Initialize worker with unique seed for reproducibility."""
-    # Use os.getpid() to ensure different seeds across processes
-    worker_seed = (os.getpid() * 1000 + worker_id) % (2**32)
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
+from model import create_model, print_model_summary
+from model.loss import CombinedLoss
+from model.ema import ExponentialMovingAverage
+from model.scheduler import WarmupCosineScheduler
+from model.distributed import setup_distributed, cleanup_distributed
+from utils import setup_logger
 
 
 class Trainer:
@@ -91,7 +63,8 @@ class Trainer:
         val_loader: Optional[DataLoader],
         device: torch.device,
         rank: int = 0,
-        world_size: int = 1
+        world_size: int = 1,
+        checkpoint: Optional[Dict] = None
     ):
         self.config = config
         self.train_loader = train_loader
@@ -113,13 +86,16 @@ class Trainer:
 
         # Optimizer (operates on unwrapped model parameters)
         self.optimizer = self._create_optimizer()
-        self.scheduler = self._create_scheduler()
 
         # Training state
         self.current_epoch = 0
         self.best_val_f1 = 0.0
         self.patience_counter = 0
         self.global_step = 0
+        self.steps_per_epoch = len(train_loader) if train_loader else 0
+
+        # Scheduler (created after steps_per_epoch is known)
+        self.scheduler = self._create_scheduler()
 
         # TensorBoard writer (only on rank 0)
         self.writer = None
@@ -133,10 +109,43 @@ class Trainer:
         if self.train_cfg.use_swa and rank == 0:
             self.swa_model = torch.optim.swa_utils.AveragedModel(self.raw_model)
 
+        # EMA (Exponential Moving Average)
+        self.ema = None
+        if self.train_cfg.use_ema:
+            self.ema = ExponentialMovingAverage(self.raw_model, decay=self.train_cfg.ema_decay)
+
         # Scaler for mixed precision
         self.scaler = torch.amp.GradScaler() if device.type == 'cuda' else None
 
         self.logger = setup_logger(rank)
+
+        # Restore from checkpoint if provided
+        if checkpoint is not None:
+            self._restore_from_checkpoint(checkpoint)
+
+    def _restore_from_checkpoint(self, checkpoint: Dict):
+        """Restore training state from checkpoint."""
+        # Restore optimizer state
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.logger.info("Restored optimizer state")
+
+        # Restore EMA state
+        if self.ema is not None and 'ema_state_dict' in checkpoint:
+            self.ema.load_state_dict(checkpoint['ema_state_dict'])
+            self.logger.info("Restored EMA state")
+
+        # Restore scheduler state
+        if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
+            if isinstance(self.scheduler, WarmupCosineScheduler):
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            else:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            self.logger.info("Restored scheduler state")
+
+        # Restore best validation metric
+        if 'best_val_f1' in checkpoint:
+            self.best_val_f1 = checkpoint['best_val_f1']
 
     def _create_loss(self) -> nn.Module:
         """Create loss function."""
@@ -168,7 +177,18 @@ class Trainer:
         cfg = self.train_cfg
         opt = self.optimizer
 
-        if cfg.scheduler == 'cosine':
+        if cfg.scheduler == 'cosine_warmup':
+            # Warmup + Cosine Decay
+            return WarmupCosineScheduler(
+                optimizer=opt,
+                warmup_epochs=cfg.warmup_epochs,
+                total_epochs=cfg.num_epochs,
+                steps_per_epoch=self.steps_per_epoch,
+                base_lr=cfg.learning_rate,
+                min_lr=cfg.min_lr,
+                warmup_steps=cfg.warmup_steps
+            )
+        elif cfg.scheduler == 'cosine':
             return CosineAnnealingWarmRestarts(opt, T_0=10, T_mult=2, eta_min=cfg.min_lr)
         elif cfg.scheduler == 'plateau':
             return ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5, verbose=True)
@@ -203,6 +223,10 @@ class Trainer:
             loss.backward()
             self._clip_gradients()
             self.optimizer.step()
+
+        # Update EMA after optimizer step
+        if self.ema is not None:
+            self.ema.update(self.raw_model)
 
         return outputs, loss
 
@@ -269,6 +293,10 @@ class Trainer:
                 self.writer.add_scalar('train/acc_step', correct/total, self.global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
 
+            # Step warmup cosine scheduler per step if using step-based warmup
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps > 0:
+                self.scheduler.step(step=self.global_step)
+
             self.global_step += 1
 
         total_loss, correct, total = self._aggregate_metrics(total_loss, correct, total)
@@ -303,10 +331,20 @@ class Trainer:
             return local_list
 
     @torch.no_grad()
-    def _validate(self, log_interval: int = 10) -> Dict[str, float]:
-        """Validate on validation set with periodic logging."""
+    def _validate(self, log_interval: int = 10, use_ema: bool = True) -> Dict[str, float]:
+        """Validate on validation set with periodic logging.
+
+        Args:
+            log_interval: Logging interval in batches
+            use_ema: Whether to use EMA model for validation (if available)
+        """
         if self.val_loader is None:
             return {}
+
+        # Apply EMA shadow parameters if enabled
+        ema_active = use_ema and self.ema is not None
+        if ema_active:
+            self.ema.apply_shadow(self.raw_model)
 
         self.model.eval()
 
@@ -380,6 +418,10 @@ class Trainer:
                 self.logger.warning(f"Failed to compute metrics: {e}")
                 auc = 0.5
 
+        # Restore original parameters after validation
+        if ema_active:
+            self.ema.restore(self.raw_model)
+
         return {
             'loss': val_loss,
             'accuracy': val_acc,
@@ -389,10 +431,21 @@ class Trainer:
             'auc': auc
         }
 
-    def _save_checkpoint(self, filename: str, is_best: bool = False):
-        """Save model checkpoint (only on rank 0)."""
+    def _save_checkpoint(self, filename: str, is_best: bool = False, use_ema: bool = True):
+        """Save model checkpoint (only on rank 0).
+
+        Args:
+            filename: Checkpoint filename
+            is_best: Whether this is the best model
+            use_ema: Whether to save EMA version as primary model
+        """
         if self.rank != 0:
             return
+
+        # Apply EMA shadow for saving if enabled
+        ema_active = use_ema and self.ema is not None
+        if ema_active:
+            self.ema.apply_shadow(self.raw_model)
 
         checkpoint = {
             'epoch': self.current_epoch,
@@ -401,8 +454,24 @@ class Trainer:
             'best_val_f1': self.best_val_f1,
             'config': self.config,
         }
+
+        # Restore original parameters after saving state dict
+        if ema_active:
+            self.ema.restore(self.raw_model)
+
+        # Save EMA state separately
+        if self.ema is not None:
+            checkpoint['ema_state_dict'] = self.ema.state_dict()
+
         if self.swa_model is not None:
             checkpoint['swa_state_dict'] = self.swa_model.state_dict()
+
+        # Save scheduler state if available
+        if self.scheduler is not None:
+            if isinstance(self.scheduler, WarmupCosineScheduler):
+                checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
+            else:
+                checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
 
         path = os.path.join(self.train_cfg.checkpoint_dir, filename)
         torch.save(checkpoint, path)
@@ -482,6 +551,10 @@ class Trainer:
                     if self.scheduler is not None:
                         if isinstance(self.scheduler, ReduceLROnPlateau):
                             self.scheduler.step(val_metrics['f1'])
+                        elif isinstance(self.scheduler, WarmupCosineScheduler):
+                            # WarmupCosineScheduler is stepped per-step or per-epoch
+                            if self.train_cfg.warmup_steps == 0:
+                                self.scheduler.step(epoch=epoch)
                         else:
                             self.scheduler.step()
 
@@ -504,41 +577,6 @@ class Trainer:
         if self.writer:
             self.writer.close()
         self.logger.info("Training completed!")
-
-
-def setup_distributed() -> Tuple[int, int, torch.device]:
-    """Setup distributed training environment."""
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    else:
-        rank, world_size, local_rank = 0, 1, 0
-
-    if world_size <= 1:
-        return rank, world_size, torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Multi-GPU DDP setup
-    os.environ.setdefault('TORCH_NCCL_BLOCKING_WAIT', '1')
-    os.environ.setdefault('TORCH_NCCL_ASYNC_ERROR_HANDLING', '1')
-
-    # Use compatible init_process_group API
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend='nccl', init_method='env://')
-
-    return rank, world_size, torch.device(f'cuda:{local_rank}')
-
-
-def cleanup_distributed():
-    """Cleanup distributed training."""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def load_data_dict(json_path: str) -> dict:
-    """Load data dictionary from JSON file."""
-    with open(json_path) as f:
-        return json.load(f)
 
 
 def main():
@@ -672,6 +710,7 @@ def main():
             print_model_summary(model)
 
         # Resume from checkpoint if specified
+        checkpoint = None
         start_epoch = 0
         if args.resume:
             if rank == 0:
@@ -685,7 +724,7 @@ def main():
             dist.barrier()
 
         # Create trainer and train
-        trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size)
+        trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size, checkpoint)
         trainer.current_epoch = start_epoch
         trainer.train()
 

@@ -26,7 +26,6 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import Config, load_config
 from dataset.dataset import CryDataset
 from model import create_model
 

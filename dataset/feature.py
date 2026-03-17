@@ -8,7 +8,7 @@ import numpy as np
 import librosa
 from typing import Dict
 
-from config import FeatureConfig
+from utils.config import FeatureConfig
 
 
 class FeatureExtractor:
@@ -20,6 +20,7 @@ class FeatureExtractor:
     - FBank (Mel filter bank / log Mel spectrum)
     - MFCC (Mel-frequency cepstral coefficients)
     - DB (Energy features: average and weighted)
+    - Delta features (time and frequency derivatives)
 
     Processing pipeline:
     1. Preemphasis filtering
@@ -30,6 +31,12 @@ class FeatureExtractor:
     6. MFCC computation (optional)
     7. Energy feature computation
     8. Normalization
+
+    Configuration options (via FeatureConfig):
+    - use_delta: Add time derivative features
+    - use_freq_delta: Add frequency derivative features
+    - use_db_feature: Add energy (dB) as additional channel
+    - use_db_norm: Normalize db features to [0, 1] range
     """
 
     def __init__(self, config: FeatureConfig):
@@ -93,6 +100,7 @@ class FeatureExtractor:
             - 'fbank': Log Mel filter bank features (n_mels, frames)
             - 'mfcc': MFCC features (n_mfcc, frames)
             - 'db': Energy features (2, frames) [average, weighted]
+              Values are normalized to [0, 1] if use_db_norm=True, else raw energy
         """
         # Ensure mono
         if y.ndim > 1:
@@ -227,12 +235,13 @@ class FeatureExtractor:
 
     def extract_with_deltas(self, y: np.ndarray, sr: int) -> np.ndarray:
         """
-        Extract FBank features with optional delta features.
+        Extract FBank features with optional delta and energy (dB) features.
 
         Returns features in shape [T, F] format for transformer input:
         - Base: [T, n_mels]
         - +time delta: [T, n_mels * 2]
         - +freq delta: [T, n_mels * 3]
+        - +db feature: adds 1 channel (e.g., [T, n_mels + 1] or [T, n_mels*2 + 1])
 
         Args:
             y: Audio waveform
@@ -241,9 +250,10 @@ class FeatureExtractor:
         Returns:
             Feature array of shape [time_frames, feature_dim]
         """
-        # Extract base FBank features
+        # Extract all features (including db)
         features = self.extract(y, sr)
         fbank = features['fbank']  # Shape: [n_mels, frames]
+        db_features = features['db']  # Shape: [2, frames] - [avg_db, weighted_db]
 
         # Transpose to [T, F] format
         fbank = fbank.T  # Shape: [frames, n_mels]
@@ -262,6 +272,11 @@ class FeatureExtractor:
             # Compute delta along frequency axis (axis=1)
             delta_f = self._compute_delta(fbank, axis=1)
             feature_components.append(delta_f)
+
+        # Add energy (dB) feature if enabled
+        # db_features shape is [2, frames]: [0]=average energy, [1]=weighted energy
+        if self.config.use_db_feature:
+            feature_components.append(features['db'].T)
 
         # Concatenate all features along feature dimension
         if len(feature_components) > 1:

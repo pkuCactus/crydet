@@ -19,11 +19,23 @@ from .loss import (
     CombinedLoss,
     create_loss
 )
+from .ema import ExponentialMovingAverage
+from .scheduler import WarmupCosineScheduler, LinearWarmupPolyDecayScheduler
+from .distributed import (
+    setup_distributed, cleanup_distributed,
+    is_distributed, get_rank, get_world_size,
+    is_main_process, barrier, all_reduce
+)
 
 __all__ = [
     'CryTransformer',
     'create_model', 'create_model_from_variant',
     'list_models', 'get_model_info', 'print_model_summary',
     'MODEL_CONFIGS',
-    'FocalLoss', 'LabelSmoothingCrossEntropy', 'CombinedLoss', 'create_loss'
+    'FocalLoss', 'LabelSmoothingCrossEntropy', 'CombinedLoss', 'create_loss',
+    'ExponentialMovingAverage',
+    'WarmupCosineScheduler', 'LinearWarmupPolyDecayScheduler',
+    'setup_distributed', 'cleanup_distributed',
+    'is_distributed', 'get_rank', 'get_world_size',
+    'is_main_process', 'barrier', 'all_reduce'
 ]
