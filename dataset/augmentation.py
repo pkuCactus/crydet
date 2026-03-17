@@ -281,8 +281,8 @@ class AudioAugmenter:
             }
             tfm.echo(**params)
         elif effect_name == 'time_stretch':
-            rate = random.uniform(0.8, 1.2)
-            tfm.rate(rate)
+            factor = random.uniform(0.8, 1.2)
+            tfm.tempo(factor)
 
     def _do_mixup(self, y: np.ndarray, label: Optional[str] = None) -> np.ndarray:
         y_mix = self._generate_mixup_sample(y, label)
