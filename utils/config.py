@@ -177,13 +177,25 @@ class FeatureConfig:
 
     @property
     def feature_dim(self) -> int:
-        """Return feature dimension based on feature type"""
-        if self.feature_type == 'mfcc':
-            return self.n_mfcc
-        elif self.feature_type == 'fft':
-            return self.n_fft // 2 + 1
-        else:  # fbank or all
-            return self.n_mels
+        """Return total feature dimension based on configuration."""
+        # Base feature dimension
+        if self.feature_type == 'fbank':
+            base_dim = self.n_mels
+        elif self.feature_type == 'mfcc':
+            base_dim = self.n_mfcc
+        else:  # 'all' - both fbank and mfcc
+            base_dim = self.n_mels + self.n_mfcc
+
+        # Total dimension = base + optional deltas + optional db features
+        dim = base_dim
+        if self.use_delta:
+            dim += base_dim  # Time delta doubles the dimension
+        if self.use_freq_delta:
+            dim += base_dim  # Frequency delta adds another base_dim
+        if self.use_db_feature:
+            dim += 2  # DB feature adds 2 channels (avg + weighted energy)
+
+        return dim
 
     @property
     def frames_per_second(self) -> int:

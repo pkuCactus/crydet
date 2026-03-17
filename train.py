@@ -700,10 +700,9 @@ def main():
         # Create model
         if rank == 0:
             logger.info(f"Creating model: d_model={config.model.d_model}, n_layers={config.model.n_layers}")
-        in_channels = config.feature.n_mels * config.feature.num_channels
         model = create_model(
             config=config.model,
-            in_channels=in_channels,
+            in_channels=config.feature.feature_dim,
             num_classes=config.model.num_classes,
             use_spec_augment=config.training.use_spec_augment
         )
