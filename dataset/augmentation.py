@@ -288,14 +288,14 @@ class AudioAugmenter:
             tfm.echo(**params)
         elif effect_name == 'time_stretch':
             factor = random.uniform(0.8, 1.2)
-            # tempo: WSOLA, good for 0.9-1.1; stretch: phase vocoder, better for extreme factors
+            # stretch: SOLA, good for 0.9-1.1; tempo: WSOLA good for (0.5, 0.9) and (1.1, inf)
             if 0.9 <= factor <= 1.1:
                 window = random.uniform(15, 25)
                 tfm.stretch(factor, window=window)
             else:
                 # stretch factor is inverse of tempo factor
-                stretch_factor = 1.0 / factor
-                tfm.tempo(stretch_factor)
+                factor = 1.0 / factor
+                tfm.tempo(factor)
             tfm.set_output_format(rate=self.sample_rate, channels=1)
 
     def _apply_effect_group(self, y: np.ndarray, effects: List[str]) -> np.ndarray:
