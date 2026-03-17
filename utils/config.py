@@ -126,6 +126,7 @@ class AugmentationConfig:
     echo_prob: float = 0.5
     noise_prob: float = 0.1
     gain_prob: float = 0.9
+    time_stretch_prob: float = 0.0
 
     _EFFECT_MAP: ClassVar[Dict[str, str]] = {
         'pitch': 'pitch_prob',
@@ -134,6 +135,7 @@ class AugmentationConfig:
         'echo': 'echo_prob',
         'noise': 'noise_prob',
         'gain': 'gain_prob',
+        'time_stretch': 'time_stretch_prob',
     }
 
     def __getitem__(self, key: str) -> float:

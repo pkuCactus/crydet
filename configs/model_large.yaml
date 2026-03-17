@@ -42,6 +42,7 @@ augmentation:
   echo_prob: 0.5
   noise_prob: 0.1
   gain_prob: 0.9
+  time_stretch_prob: 0.0
 
 # Model settings
 # Architecture is controlled by layer parameters (d_model, n_layers, n_heads)
