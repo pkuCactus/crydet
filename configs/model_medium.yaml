@@ -113,7 +113,6 @@ training:
   use_spec_augment: true
   spec_augment_freq_mask: 8
   spec_augment_time_mask: 20
-  # SWA (Stochastic Weight Averaging)
   # Loss function configuration
   loss:
     loss_type: combined         # Options: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce', 'ohem_combined'
