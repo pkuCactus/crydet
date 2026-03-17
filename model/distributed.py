@@ -45,7 +45,7 @@ def setup_distributed() -> Tuple[int, int, torch.device]:
 
     # Use compatible init_process_group API
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://', device_id=local_rank)
 
     return rank, world_size, torch.device(f'cuda:{local_rank}')
 
