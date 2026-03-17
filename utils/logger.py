@@ -48,9 +48,8 @@ def setup_logger(
     # Determine effective level based on rank
     effective_level = level if rank == 0 else logging.WARNING
 
-    # Get logger
-    logger_name = name or __name__
-    logger = logging.getLogger(logger_name)
+    # Get logger (root logger if name is None)
+    logger = logging.getLogger(name) if name is not None else logging.getLogger()
     logger.setLevel(effective_level)
 
     # Avoid adding handlers if they already exist
@@ -105,9 +104,8 @@ def setup_file_logger(
     # Determine effective level based on rank
     effective_level = level if rank == 0 else logging.WARNING
 
-    # Get logger
-    logger_name = name or __name__
-    logger = logging.getLogger(logger_name)
+    # Get logger (root logger if name is None)
+    logger = logging.getLogger(name) if name is not None else logging.getLogger()
     logger.setLevel(effective_level)
 
     # Clear existing handlers to avoid duplicates
