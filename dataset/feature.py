@@ -33,8 +33,9 @@ class FeatureExtractor:
     8. Normalization
 
     Configuration options (via FeatureConfig):
-    - use_delta: Add time derivative features
-    - use_freq_delta: Add frequency derivative features
+    - feature_type: 'fbank', 'mfcc', or 'all' (fbank+mfcc)
+    - use_delta: Add time derivative features (computed on combined base)
+    - use_freq_delta: Add frequency derivative features (computed on combined base)
     - use_db_feature: Add energy (dB) as additional channel
     - use_db_norm: Normalize db features to [0, 1] range
     """
@@ -96,7 +97,6 @@ class FeatureExtractor:
 
         Returns:
             Dictionary containing:
-            - 'fft': FFT magnitude spectrum (n_fft//2+1, frames)
             - 'fbank': Log Mel filter bank features (n_mels, frames)
             - 'mfcc': MFCC features (n_mfcc, frames)
             - 'db': Energy features (2, frames) [average, weighted]
@@ -141,12 +141,12 @@ class FeatureExtractor:
 
         # Compute MFCC from log Mel spectrum
         mfcc = librosa.feature.mfcc(
-            S=log_mel.T,
+            S=log_mel,
             n_mfcc=self.config.n_mfcc,
             n_mels=self.config.n_mels,
             fmin=self.config.fmin,
             fmax=self.config.fmax
-        ).T  # (n_mfcc, frames)
+        )  # (n_mfcc, frames)
 
         # Compute energy features (in dB)
         # 1. Average energy per frame
@@ -167,7 +167,6 @@ class FeatureExtractor:
 
         # Transpose to (feature_dim, frames) format
         features = {
-            'fft': fft_magnitude,
             'fbank': fbank,
             'mfcc': mfcc,
             'db': db_features
@@ -191,16 +190,14 @@ class FeatureExtractor:
         fbank_max = np.max(fbank, axis=0, keepdims=True)  # (1, frames)
         fbank_min = np.min(fbank, axis=0, keepdims=True)  # (1, frames)
 
-        # Exponential smoothing of max values along time axis
+        # Exponential smoothing of max values along time axis (attack-decay envelope)
         if decay > 0 and fbank_max.shape[1] > 1:
-            smoothed_max = np.zeros_like(fbank_max)
-            smoothed_max[0, 0] = fbank_max[0, 0]
-            for i in range(1, fbank_max.shape[1]):
-                if fbank_max[0, i] > smoothed_max[0, i-1]:
-                    smoothed_max[0, i] = decay * smoothed_max[0, i-1] + (1 - decay) * fbank_max[0, i]
-                else:
-                    smoothed_max[0, i] = fbank_max[0, i]
-            fbank_max = smoothed_max
+            smoothed = np.zeros_like(fbank_max)
+            smoothed[0, 0] = fbank_max[0, 0]
+            for t in range(1, fbank_max.shape[1]):
+                prev, curr = smoothed[0, t-1], fbank_max[0, t]
+                smoothed[0, t] = decay * prev + (1 - decay) * curr if curr > prev else curr
+            fbank_max = smoothed
 
         # Normalize to [0, 1]
         range_val = fbank_max - fbank_min
@@ -233,15 +230,36 @@ class FeatureExtractor:
 
         return delta
 
+    def _get_base_features(self, features: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Get base features based on feature_type configuration.
+
+        Returns base features with shape [T, F] where F depends on feature_type:
+        - 'fbank': [T, n_mels], 'mfcc': [T, n_mfcc], 'all': [T, n_mels + n_mfcc]
+        """
+        feature_type = self.config.feature_type
+
+        if feature_type == 'mfcc':
+            return features['mfcc'].T
+
+        if feature_type == 'all':
+            return np.concatenate([features['fbank'].T, features['mfcc'].T], axis=1)
+
+        # Default: 'fbank'
+        return features['fbank'].T
+
     def extract_with_deltas(self, y: np.ndarray, sr: int) -> np.ndarray:
         """
-        Extract FBank features with optional delta and energy (dB) features.
+        Extract features with optional delta and energy (dB) features.
 
-        Returns features in shape [T, F] format for transformer input:
-        - Base: [T, n_mels]
-        - +time delta: [T, n_mels * 2]
-        - +freq delta: [T, n_mels * 3]
-        - +db feature: adds 1 channel (e.g., [T, n_mels + 1] or [T, n_mels*2 + 1])
+        Base features are selected by feature_type, then deltas are computed
+        on the combined base features.
+
+        Returns features in shape [T, F] format:
+        - Base: [T, base_dim] where base_dim = n_mels or n_mfcc or n_mels+n_mfcc
+        - +time delta: [T, base_dim * 2]
+        - +freq delta: [T, base_dim * 3]
+        - +db feature: adds 2 channel
 
         Args:
             y: Audio waveform
@@ -250,65 +268,41 @@ class FeatureExtractor:
         Returns:
             Feature array of shape [time_frames, feature_dim]
         """
-        # Extract all features (including db)
+        # Extract all features
         features = self.extract(y, sr)
-        fbank = features['fbank']  # Shape: [n_mels, frames]
-        db_features = features['db']  # Shape: [2, frames] - [avg_db, weighted_db]
 
-        # Transpose to [T, F] format
-        fbank = fbank.T  # Shape: [frames, n_mels]
+        # Get base features based on feature_type
+        base = self._get_base_features(features)  # Shape: [frames, base_dim]
 
-        # List to collect all feature components
-        feature_components = [fbank]
-
-        # Add time delta features if enabled
-        if self.config.use_delta:
-            # Compute delta along time axis (axis=0)
-            delta_t = self._compute_delta(fbank, axis=0)
-            feature_components.append(delta_t)
-
-        # Add frequency delta features if enabled
-        if self.config.use_freq_delta:
-            # Compute delta along frequency axis (axis=1)
-            delta_f = self._compute_delta(fbank, axis=1)
-            feature_components.append(delta_f)
+        # Build feature components: base + optional deltas + optional db
+        deltas = [
+            self._compute_delta(base, axis=0) if self.config.use_delta else None,
+            self._compute_delta(base, axis=1) if self.config.use_freq_delta else None
+        ]
+        feature_components = [base] + [d for d in deltas if d is not None]
 
         # Add energy (dB) feature if enabled
-        # db_features shape is [2, frames]: [0]=average energy, [1]=weighted energy
         if self.config.use_db_feature:
             feature_components.append(features['db'].T)
 
         # Concatenate all features along feature dimension
-        if len(feature_components) > 1:
-            combined = np.concatenate(feature_components, axis=1)
-        else:
-            combined = fbank
-
-        return combined
+        return np.concatenate(feature_components, axis=1) if len(feature_components) > 1 else base
 
     def extract_single(self, y: np.ndarray, sr: int) -> np.ndarray:
         """
-        Extract single feature type (configured in feature_type)
+        Extract single feature type with optional deltas and db.
+
+        This is an alias for extract_with_deltas() for API consistency.
+        The feature_type determines the base features (fbank/mfcc/all).
 
         Args:
             y: Audio waveform
             sr: Sample rate
 
         Returns:
-            Feature array based on config.feature_type
-            For 'fbank', returns [T, F] format with optional deltas
+            Feature array of shape [time_frames, feature_dim]
         """
-        features = self.extract(y, sr)
-
-        if self.config.feature_type == 'fft':
-            return features['fft']
-        elif self.config.feature_type == 'mfcc':
-            return features['mfcc']
-        elif self.config.feature_type == 'db':
-            return features['db']
-        else:  # 'fbank' or 'all'
-            # Return with deltas in [T, F] format
-            return self.extract_with_deltas(y, sr)
+        return self.extract_with_deltas(y, sr)
 
     def __call__(self, y: np.ndarray, sr: int) -> Dict[str, np.ndarray]:
         """Alias for extract method"""

@@ -161,23 +161,42 @@ DataLoader → Model
 | `hop_length` | 512 | Frame shift (32ms @ 16kHz) |
 | `fmin` | 250 | Min frequency for mel filter |
 | `fmax` | 8000 | Max frequency for mel filter |
-| `use_delta` | false | Add time delta features (+64 dim) |
-| `use_freq_delta` | false | Add frequency delta features (+64 dim) |
-| `use_db_feature` | false | Add energy (dB) as additional channel (+1 dim) |
+| `feature_type` | 'fbank' | Base feature type: 'fbank', 'mfcc', or 'all' (fbank+mfcc) |
+| `use_delta` | false | Add time delta features (+base_dim) |
+| `use_freq_delta` | false | Add frequency delta features (+base_dim) |
+| `use_db_feature` | false | Add energy (dB) as additional channel (+2 dims) |
 | `use_db_norm` | true | Normalize db features to [0, 1] range |
 
 **Output dimensions:**
-- Base: `[T, 64]`
-- +delta: `[T, 128]`
-- +freq_delta: `[T, 192]`
-- +db: adds 2 channel (e.g., `[T, 65]`, `[T, 129]`, or `[T, 194]`)
+| Config | Base | +delta | +freq_delta | +db |
+|--------|------|--------|-------------|-----|
+| fbank (n_mels=64) | `[T, 64]` | `[T, 128]` | `[T, 192]` | `[T, 66]` / `[T, 130]` / `[T, 194]` |
+| mfcc (n_mfcc=16) | `[T, 16]` | `[T, 32]` | `[T, 48]` | `[T, 18]` / `[T, 34]` / `[T, 50]` |
+| all (64+16) | `[T, 80]` | `[T, 160]` | `[T, 240]` | `[T, 82]` / `[T, 162]` / `[T, 242]` |
+
+**Feature extraction API:**
+
+```python
+extractor = FeatureExtractor(config)
+
+# Method 1: extract() - Returns all features as dict
+features = extractor.extract(y, sr)
+# Returns: {
+#   'fbank': (n_mels, frames),
+#   'mfcc': (n_mfcc, frames),
+#   'db': (2, frames)  # [avg_energy, weighted_energy]
+# }
+
+# Method 2: extract_with_deltas() or extract_single()
+features = extractor.extract_with_deltas(y, sr)
+# Returns: (frames, feature_dim) based on config
+```
 
 **Note on energy features:** The `extract()` method returns db as `(2, frames)` array containing:
 - `db[0]`: Average energy per frame
 - `db[1]`: Hanning-windowed (weighted) energy per frame
 
-When `use_db_feature=True`:
-- Select normalization via `use_db_norm` (default: true, normalized to [0, 1])
+When `use_db_feature=True`, both energy channels are appended (adds 2 dimensions).
 
 ## Model Configuration
 

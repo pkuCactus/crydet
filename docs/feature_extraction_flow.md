@@ -1,8 +1,8 @@
-# ori/feature 特征提取流程分析
+# 特征提取流程分析
 
 ## 1. 系统概述
 
-ori/feature.py 是一个完整的音频特征提取系统，主要用于婴儿啼哭检测。该系统基于 TensorFlow 实现，从 PCM 音频文件中提取多种特征，包括 FBank、MFCC、FFT 和能量特征等。
+[dataset/feature.py](../dataset/feature.py) 是音频特征提取模块，基于 NumPy/Librosa 实现，支持从音频波形中提取多种特征，包括 FBank、MFCC 和能量特征等。支持通过配置灵活组合特征类型、添加 delta 特征和能量特征。
 
 ## 2. 处理流程总图
 
@@ -37,9 +37,10 @@ graph TB
     end
 
     subgraph "E. 特征提取"
-        E1[FFT计算] --> E2[Mel滤波器组]
-        E2 --> E3[对数变换]
-        E3 --> E4[MFCC计算]
+        E1[Mel滤波器组] --> E2[对数变换]
+        E2 --> E3[MFCC计算]
+        E2 --> E4[FBank输出]
+        E5[能量计算] --> E6[DB特征]
     end
 
     subgraph "F. 数据归一化"
@@ -47,9 +48,9 @@ graph TB
         F2 --> F3[幅值裁剪]
     end
 
-    subgraph "G. 数据增强"
-        G1[DropBlock生成] --> G2[掩码应用]
-        G2 --> G3[增强统计]
+    subgraph "G. Delta特征"
+        G1[时间差分计算] --> G2[频率差分计算]
+        G2 --> G3[特征拼接]
     end
 
     subgraph "H. 输出特征"
@@ -290,16 +291,18 @@ def get_pcm(file_name, sr=16000, offset=0.0, duration=None, **kwargs):
 
 #### 4.2.1 初始化配置
 ```python
-class Feature_net(tf.keras.Model):
-    def __init__(self, mask_rate=0., mask_prob=0., use_fbank_norm=True,
-                 use_db_norm=False, fbank_decary=0.9, db_avg_win=0.):
+class FeatureExtractor:
+    def __init__(self, config: FeatureConfig):
 ```
 
 **关键配置**：
+- `feature_type`: 基础特征类型 ('fbank', 'mfcc', 'all')
 - `use_fbank_norm`: 是否使用FBank归一化
 - `use_db_norm`: 是否使用dB特征归一化
-- `fbank_decary`: FBank归一化衰减系数
-- `mask_rate`: 数据掩码率（数据增强）
+- `use_delta`: 是否添加时间差分特征
+- `use_freq_delta`: 是否添加频率差分特征
+- `use_db_feature`: 是否添加能量特征（2通道）
+- `fbank_decay`: FBank归一化衰减系数
 
 #### 4.2.2 预处理步骤
 
@@ -326,65 +329,85 @@ sound_db_average_hann = energy_to_db(tf.reduce_mean(sound_db_hann, axis=-1))
 
 #### 4.2.3 特征提取核心算法
 
-**1. FFT特征提取**：
+**1. extract() 方法** - 返回所有特征：
 ```python
-# 应用汉宁窗
-y_rfft = tf.signal.rfft(framed_gain * self.window, [NFFT])
-fft = tf.abs(y_rfft)  # 获取幅度谱
+def extract(self, y: np.ndarray, sr: int) -> Dict[str, np.ndarray]:
+    # Returns: {
+    #   'fbank': (n_mels, frames),
+    #   'mfcc': (n_mfcc, frames),
+    #   'db': (2, frames)  # [avg_energy, weighted_energy]
+    # }
 ```
 
 **2. Mel滤波器组**：
 ```python
-# Mel滤波器权重矩阵
-self.mel_matrix = tf.signal.linear_to_mel_weight_matrix(
-    num_mel_bins=N_MELS,
-    num_spectrogram_bins=NFFT // 2 + 1,
-    sample_rate=SR,
-    lower_edge_hertz=MEL_FMIN,
-    upper_edge_hertz=MEL_FMAX
+self._mel_matrix = librosa.filters.mel(
+    sr=sr,
+    n_fft=self.config.n_fft,
+    n_mels=self.config.n_mels,
+    fmin=self.config.fmin,
+    fmax=self.config.fmax
 )
-
-# 计算Mel谱
-y_melspec = tf.matmul(y_fft, self.mel_matrix)
+mel_spectrum = np.dot(mel_matrix, fft_magnitude)
+log_mel = np.log(np.maximum(mel_spectrum, 1e-8))
 ```
 
 **3. MFCC特征提取**：
 ```python
-# 从Mel谱计算MFCC
-y_mfcc = tf.signal.mfccs_from_log_mel_spectrograms(
-    tf.math.log(y_melspec + 1e-6)[:, :, :N_MFCC]
-)
+mfcc = librosa.feature.mfcc(
+    S=log_mel,
+    n_mfcc=self.config.n_mfcc,
+    n_mels=self.config.n_mels,
+    fmin=self.config.fmin,
+    fmax=self.config.fmax
+)  # (n_mfcc, frames)
 ```
 
 **4. FBank特征归一化**：
 ```python
-if self.use_fbank_norm:
-    # 计算最大值
-    fbank_max_ = tf.reduce_max(fbank_ori[:, :, 2:-2], axis=[2], keepdims=True)
-
-    # 指数平滑更新
-    t = tf.reduce_mean(fbank_max_[:, :1, :], -2, keepdims=True)
-    t = tf.where(maxs > t, t * decary_up + maxs * (1 - decary_up),
-                 t * decary + maxs * (1 - decary))
-
-    # 归一化处理
-    fbank = tf.where(fbank_max != fbank_min,
-                     (fbank_ori - fbank_min) / (fbank_max - fbank_min),
-                     fbank_ori)
-    fbank = tf.clip_by_value(fbank, 0., 1.0)
+if self.config.use_fbank_norm:
+    fbank_max = np.max(fbank, axis=0, keepdims=True)
+    fbank_min = np.min(fbank, axis=0, keepdims=True)
+    # 指数平滑
+    for t in range(1, fbank_max.shape[1]):
+        prev, curr = smoothed[0, t-1], fbank_max[0, t]
+        smoothed[0, t] = decay * prev + (1 - decay) * curr if curr > prev else curr
+    # 归一化到[0, 1]
+    fbank_norm = (fbank - fbank_min) / (fbank_max - fbank_min)
+    fbank_norm = np.clip(fbank_norm, 0.0, 1.0)
 ```
 
-#### 4.2.4 数据增强（可选）
+#### 4.2.4 extract_with_deltas() 主API
 
-**DropBlock增强**：
+**功能**：根据配置提取基础特征并添加可选的delta特征和能量特征
+
 ```python
-def dropblock(x, keep_prob, block_size):
-    # 创建随机掩码
-    mask = tf.nn.relu(tf.sign(gamma - tf.random.uniform(sampling_mask_shape)))
-    # 应用掩码
-    mask_pool = tf.nn.max_pool(mask, [1, block_size, block_size, 1], [1, 1, 1, 1], 'SAME')
-    return mask_pool
+def extract_with_deltas(self, y: np.ndarray, sr: int) -> np.ndarray:
+    # 1. 提取所有基础特征
+    features = self.extract(y, sr)
+
+    # 2. 根据feature_type选择基础特征
+    base = self._get_base_features(features)  # [T, base_dim]
+
+    # 3. 添加可选特征
+    components = [base]
+    if self.config.use_delta:
+        components.append(self._compute_delta(base, axis=0))  # 时间差分
+    if self.config.use_freq_delta:
+        components.append(self._compute_delta(base, axis=1))  # 频率差分
+    if self.config.use_db_feature:
+        components.append(features['db'].T)  # 能量特征 (2通道)
+
+    # 4. 拼接所有特征
+    return np.concatenate(components, axis=1)
 ```
+
+**特征维度计算**：
+| 配置 | Base | +delta | +freq_delta | +db |
+|------|------|--------|-------------|-----|
+| fbank (64) | [T, 64] | [T, 128] | [T, 192] | [T, 66]/[T, 130]/[T, 194] |
+| mfcc (16) | [T, 16] | [T, 32] | [T, 48] | [T, 18]/[T, 34]/[T, 50] |
+| all (64+16) | [T, 80] | [T, 160] | [T, 240] | [T, 82]/[T, 162]/[T, 242] |
 
 ### 4.3 批量处理模块 (get_feats_from_file 函数)
 
@@ -411,61 +434,92 @@ def get_feat_from_pcm(y, mask_callback=None)
 ```
 
 **输出特征**：
-- `fbank`: Mel频谱特征 (63, 26)
-- `fft`: FFT幅度谱 (63, 26)
-- `mfcc`: MFCC特征 (63, 26)
-- `db`: 能量特征 (62, 2)
-- `y`: 处理后的音频信号 (SR*DUR)
+- `fbank`: Mel频谱特征 (n_mels, frames)
+- `mfcc`: MFCC特征 (n_mfcc, frames)
+- `db`: 能量特征 (2, frames) - [平均能量, 加权能量]
+
+**extract_with_deltas() 输出**：
+- 形状: (frames, feature_dim)
+- feature_dim 取决于配置，详见 4.2.4 维度表
 
 ## 5. 输出特征说明
 
-### 5.1 输出列表
+### 5.1 主要API方法
+
+**extract(y, sr)** - 提取所有基础特征：
 ```python
-outputs = [fft, fbank, mfcc, db, masked_rate]
+features = extractor.extract(y, sr)
+# Returns: {
+#   'fbank': (n_mels, frames),
+#   'mfcc': (n_mfcc, frames),
+#   'db': (2, frames)
+# }
 ```
 
-### 5.2 特征维度
-- **FFT特征**: (batch, frames, NFFT//2+1)
-- **FBank特征**: (batch, frames, N_MELS)
-- **MFCC特征**: (batch, frames, N_MFCC)
-- **DB特征**: (batch, frames, 2) [平均能量, 加权能量]
-- **掩码率**: (batch,) [用于数据增强统计]
+**extract_with_deltas(y, sr)** - 根据配置组合特征：
+```python
+features = extractor.extract_with_deltas(y, sr)
+# Returns: (frames, feature_dim)
+# feature_dim 取决于 feature_type, use_delta, use_freq_delta, use_db_feature
+```
+
+### 5.2 特征维度参考表
+
+| 配置 | Base | +delta | +freq_delta | +db (2通道) |
+|------|------|--------|-------------|-------------|
+| fbank (64) | [T, 64] | [T, 128] | [T, 192] | [T, 66] / [T, 130] / [T, 194] |
+| mfcc (16) | [T, 16] | [T, 32] | [T, 48] | [T, 18] / [T, 34] / [T, 50] |
+| all (64+16) | [T, 80] | [T, 160] | [T, 240] | [T, 82] / [T, 162] / [T, 242] |
+
+**注**：db 特征包含 2 通道（平均能量 + 加权能量）
 
 ### 5.3 特征归一化
 
-#### 5.3.1 对数域转换
+#### 5.3.1 能量到dB转换
 ```python
-def amplitude_to_db(self, S):
-    return (tf.maximum(tf.math.log(tf.maximum(tf.square(S), 1e-8)) / tf.math.log(10.), -8) + 8) / 8
+def energy_to_db(energy: np.ndarray, ref: float = 1.0, amin: float = 1e-8) -> np.ndarray:
+    db = 10 * np.log10(np.maximum(energy, amin) / ref)
+    # 归一化到[0, 1]范围（clip在-8dB）
+    return (np.maximum(db, -8) + 8) / 8
 ```
 
-#### 5.3.2 幅值归一化
+#### 5.3.2 FBank归一化
 ```python
-# 转换到0-1范围
-fbank = tf.where(fbank_max != fbank_min,
-                 (fbank_ori - fbank_min) / (fbank_max - fbank_min),
-                 fbank_ori)
-fbank = tf.clip_by_value(fbank, 0., 1.0)
+def _normalize_fbank(self, fbank: np.ndarray) -> np.ndarray:
+    decay = self.config.fbank_decay
+
+    # 计算每帧的最大/最小值
+    fbank_max = np.max(fbank, axis=0, keepdims=True)
+    fbank_min = np.min(fbank, axis=0, keepdims=True)
+
+    # 指数平滑（attack-decay）
+    if decay > 0 and fbank_max.shape[1] > 1:
+        smoothed = np.zeros_like(fbank_max)
+        smoothed[0, 0] = fbank_max[0, 0]
+        for t in range(1, fbank_max.shape[1]):
+            prev, curr = smoothed[0, t-1], fbank_max[0, t]
+            smoothed[0, t] = decay * prev + (1 - decay) * curr if curr > prev else curr
+        fbank_max = smoothed
+
+    # 归一化到[0, 1]
+    range_val = np.where(fbank_max - fbank_min > 0, fbank_max - fbank_min, 1.0)
+    fbank_norm = (fbank - fbank_min) / range_val
+    return np.clip(fbank_norm, 0.0, 1.0)
 ```
 
 ## 6. 技术特点
 
-### 6.1 高性能优化
-- **TensorFlow图优化**：使用 `@tf.function` 装饰器
-- **GPU/CPU分离**：特定操作在CPU上执行
-- **缓存机制**：支持重采样和特征缓存
-- **批处理**：高效的时间序列分块处理
+### 6.1 设计特点
+- **NumPy/Librosa实现**：纯NumPy实现，无深度学习框架依赖
+- **灵活配置**：通过FeatureConfig灵活组合特征类型和选项
+- **统一格式**：extract()返回统一格式 `[feature_dim, frames]`
+- **Delta计算**：支持时间和频率维度的差分特征计算
 
 ### 6.2 鲁棒性设计
 - **异常处理**：完善的错误捕获和处理
 - **边界检查**：数据长度和有效性验证
 - **数值稳定**：使用小常数避免除零错误
 - **NaN处理**：检查和处理NaN值
-
-### 6.3 数据增强
-- **DropBlock**：随机的特征掩码增强
-- **动态掩码**：根据概率应用不同的掩码
-- **音频切片**：重叠的时间窗口采样
 
 ## 7. 应用场景
 
@@ -476,18 +530,40 @@ fbank = tf.clip_by_value(fbank, 0., 1.0)
 - **声学事件检测**：环境音频分析
 
 ### 7.2 推荐配置
-```python
-# FBank特征配置
-feature_type: 'fbank'
-feature_dim: 32
-sample_rate: 16000
-frame_length: 25  # 帧长度(ms)
-frame_shift: 31.25  # 帧移(ms)
 
-# MFCC特征配置
-feature_type: 'mfcc'
-feature_dim: 16
-# 其他参数相同
+**FBank + Delta + DB 配置**（推荐）：
+```yaml
+feature:
+  feature_type: 'fbank'
+  n_mels: 64
+  n_fft: 1024
+  hop_length: 500
+  fmin: 250
+  fmax: 8000
+  use_delta: true          # 添加时间差分
+  use_freq_delta: false    # 不添加频率差分
+  use_db_feature: true     # 添加能量特征（2通道）
+  use_db_norm: true        # 能量归一化到[0,1]
+  use_fbank_norm: true     # FBank归一化
+```
+
+**MFCC 配置**：
+```yaml
+feature:
+  feature_type: 'mfcc'
+  n_mels: 64
+  n_mfcc: 16
+  # ...其他参数
+```
+
+**All (FBank + MFCC) 配置**：
+```yaml
+feature:
+  feature_type: 'all'      # FBank和MFCC拼接
+  n_mels: 64
+  n_mfcc: 16
+  use_delta: true
+  # ...其他参数
 ```
 
 ## 8. 性能参数
