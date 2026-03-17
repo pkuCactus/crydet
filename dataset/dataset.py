@@ -167,7 +167,7 @@ class CryDataset(Dataset):
         min_energy_db: float
     ) -> List[Tuple[str, float, float, bool]]:
         """
-        Filter out samples with energy below threshold
+        Filter out samples with energy below threshold using parallel processing.
 
         Args:
             schedules: List of (file_path, start_time, actual_len, need_pad) tuples
@@ -176,28 +176,36 @@ class CryDataset(Dataset):
         Returns:
             Filtered list of schedules
         """
-        valid_schedules = []
-
-        for file_path, start_time, actual_len, need_pad in tqdm.tqdm(
-            schedules, desc="Filtering low-energy cry samples", leave=False
-        ):
+        def _check_energy(schedule: Tuple[str, float, float, bool]) -> Optional[Tuple[Tuple[str, float, float, bool], float]]:
+            """Check energy for a single schedule, return (schedule, energy) or None."""
+            file_path, start_time, actual_len, need_pad = schedule
             try:
-                # Load audio segment
                 waveform, _ = self.audio_reader.load_by_time(
                     file_path, start_time, start_time + actual_len
                 )
-
-                # Compute energy
                 energy_db = compute_energy_db(waveform)
-
-                if energy_db >= min_energy_db:
-                    valid_schedules.append((file_path, start_time, actual_len, need_pad))
-                else:
-                    LOGGER.debug(f"Filtered: {file_path} @ {start_time:.2f}s (energy: {energy_db:.1f} dB)")
-
+                return (schedule, energy_db)
             except Exception as e:
                 LOGGER.warning(f"Error loading {file_path} @ {start_time:.2f}s: {e}")
-                continue
+                return None
+
+        max_workers = min(32, (os.cpu_count() or 1) * 4)
+        valid_schedules = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_check_energy, s) for s in schedules]
+
+            for future in tqdm.tqdm(as_completed(futures), total=len(futures),
+                                    desc=f"Filtering low-energy ({max_workers} workers)", leave=False):
+                result = future.result()
+                if result is None:
+                    continue
+                schedule, energy_db = result
+                if energy_db >= min_energy_db:
+                    valid_schedules.append(schedule)
+                else:
+                    file_path, start_time, _, _ = schedule
+                    LOGGER.debug(f"Filtered: {file_path} @ {start_time:.2f}s (energy: {energy_db:.1f} dB)")
 
         return valid_schedules
 
