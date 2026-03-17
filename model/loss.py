@@ -1,27 +1,27 @@
-"""
-Loss functions for CryTransformer models
-
-Includes:
-- FocalLoss: For handling class imbalance
-- LabelSmoothingCrossEntropy: Label smoothing for better generalization
-- CombinedLoss: Combined Focal + Label Smoothing
-- OHEMLoss: Online Hard Example Mining wrapper
-"""
+"""Loss functions for CryTransformer models."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _apply_reduction(loss: torch.Tensor, reduction: str) -> torch.Tensor:
+    """Apply reduction to per-sample loss tensor."""
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
+
 class FocalLoss(nn.Module):
-    """Focal Loss for handling class imbalance
+    """Focal Loss for handling class imbalance (Lin et al., 2017).
 
     Down-weights easy examples and focuses on hard negatives.
-    Based on "Focal Loss for Dense Object Detection" (Lin et al., 2017)
 
     Args:
-        alpha: Weighting factor for rare class (default: 0.25)
-        gamma: Focusing parameter (default: 2.0)
+        alpha: Weighting factor for rare class
+        gamma: Focusing parameter
         reduction: 'mean', 'sum', or 'none'
     """
 
@@ -32,34 +32,21 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            inputs: Logits tensor of shape [B, num_classes]
-            targets: Ground truth class indices of shape [B]
-
-        Returns:
-            Focal loss scalar
-        """
+        """Compute focal loss."""
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
         pt = torch.exp(-ce_loss)
         focal_term = (1 - pt) ** self.gamma
         loss = self.alpha * focal_term * ce_loss
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
+        return _apply_reduction(loss, self.reduction)
 
 
 class LabelSmoothingCrossEntropy(nn.Module):
-    """Label Smoothing Cross Entropy Loss
+    """Label Smoothing Cross Entropy Loss (Szegedy et al., 2015).
 
     Prevents over-confidence by smoothing target distribution.
-    Based on "Rethinking the Inception Architecture for Computer Vision" (Szegedy et al., 2015)
 
     Args:
-        smoothing: Smoothing factor (default: 0.1)
+        smoothing: Smoothing factor
         reduction: 'mean', 'sum', or 'none'
     """
 
@@ -69,14 +56,7 @@ class LabelSmoothingCrossEntropy(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            inputs: Logits tensor of shape [B, num_classes]
-            targets: Ground truth class indices of shape [B]
-
-        Returns:
-            Label smoothing cross entropy loss scalar
-        """
+        """Compute label smoothing cross entropy loss."""
         num_classes = inputs.size(-1)
         log_probs = F.log_softmax(inputs, dim=-1)
 
@@ -84,26 +64,20 @@ class LabelSmoothingCrossEntropy(nn.Module):
         targets_smooth = targets_one_hot * (1 - self.smoothing) + self.smoothing / num_classes
 
         loss = -(targets_smooth * log_probs).sum(dim=-1)
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
+        return _apply_reduction(loss, self.reduction)
 
 
 class CombinedLoss(nn.Module):
-    """Combined Focal Loss + Label Smoothing
+    """Combined Focal Loss + Label Smoothing.
 
-    Combines the benefits of focal loss (handling class imbalance)
-    and label smoothing (better generalization).
+    Combines focal loss (class imbalance handling) with label smoothing.
 
     Args:
-        alpha: Focal loss alpha parameter (default: 0.25)
-        gamma: Focal loss gamma parameter (default: 2.0)
-        label_smoothing: Label smoothing factor (default: 0.1)
-        focal_weight: Weight for focal loss vs label smoothing (default: 0.5)
-        reduction: 'mean', 'sum', or 'none' (default: 'mean')
+        alpha: Focal loss alpha parameter
+        gamma: Focal loss gamma parameter
+        label_smoothing: Label smoothing factor
+        focal_weight: Weight for focal loss vs label smoothing
+        reduction: 'mean', 'sum', or 'none'
     """
 
     def __init__(
@@ -121,23 +95,11 @@ class CombinedLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            inputs: Logits tensor of shape [B, num_classes]
-            targets: Ground truth class indices of shape [B]
-
-        Returns:
-            Combined loss scalar or per-sample losses
-        """
+        """Compute combined loss."""
         focal = self.focal_loss(inputs, targets)
         ce = self.ce_loss(inputs, targets)
         loss = self.focal_weight * focal + (1 - self.focal_weight) * ce
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        return loss
+        return _apply_reduction(loss, self.reduction)
 
 
 _LOSS_CREATORS = {
@@ -155,22 +117,16 @@ _LOSS_CREATORS = {
 
 
 class OHEMLoss(nn.Module):
-    """Online Hard Example Mining (OHEM) Loss Wrapper
+    """Online Hard Example Mining (OHEM) Loss Wrapper.
 
     Selects hard examples based on loss values and only backpropagates through them.
-    Based on "Training Region-based Object Detectors with Online Hard Example Mining"
-    (Shrivastava et al., 2016)
+    Based on Shrivastava et al., 2016.
 
     Args:
         base_loss: Base loss function (e.g., FocalLoss, CrossEntropyLoss)
-        hard_ratio: Ratio of hard examples to keep (default: 0.25)
-        min_hard_num: Minimum number of hard examples to keep (default: 4)
+        hard_ratio: Ratio of hard examples to keep
+        min_hard_num: Minimum number of hard examples to keep
         reduction: 'mean' or 'sum' for final aggregation
-
-    Example:
-        >>> base_loss = FocalLoss(alpha=0.25, gamma=2.0)
-        >>> ohem_loss = OHEMLoss(base_loss, hard_ratio=0.25)
-        >>> loss = ohem_loss(inputs, targets)
     """
 
     def __init__(
@@ -186,86 +142,52 @@ class OHEMLoss(nn.Module):
         self.min_hard_num = min_hard_num
         self.reduction = reduction
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            inputs: Logits tensor of shape [B, num_classes]
-            targets: Ground truth class indices of shape [B]
-
-        Returns:
-            OHEM loss scalar (only hard examples contribute)
-        """
-        batch_size = inputs.size(0)
-
-        # Compute per-sample loss (no reduction)
+    def _compute_per_sample_loss(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute per-sample loss without gradient tracking."""
         with torch.no_grad():
-            # Temporarily disable reduction for base loss
             original_reduction = getattr(self.base_loss, 'reduction', None)
             if original_reduction is not None:
                 self.base_loss.reduction = 'none'
-
             per_sample_loss = self.base_loss(inputs, targets)
-
-            # Restore original reduction
             if original_reduction is not None:
                 self.base_loss.reduction = original_reduction
 
-        # Handle multi-dimensional loss (e.g., from label smoothing)
         if per_sample_loss.dim() > 1:
             per_sample_loss = per_sample_loss.mean(dim=-1)
+        return per_sample_loss
 
-        # Calculate number of hard examples to keep (ensure valid range)
+    def _select_hard_indices(self, per_sample_loss: torch.Tensor) -> torch.Tensor:
+        """Select indices of hard examples based on loss values."""
+        batch_size = per_sample_loss.size(0)
         num_hard = max(int(batch_size * self.hard_ratio), min(self.min_hard_num, batch_size))
         num_hard = min(num_hard, batch_size)
-
-        # Select hard examples (top-k by loss value)
         _, hard_indices = torch.topk(per_sample_loss, num_hard, largest=True, sorted=False)
+        return hard_indices
 
-        # Get hard examples
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute OHEM loss on hard examples only."""
+        per_sample_loss = self._compute_per_sample_loss(inputs, targets)
+        hard_indices = self._select_hard_indices(per_sample_loss)
+
         hard_inputs = inputs[hard_indices]
         hard_targets = targets[hard_indices]
-
-        # Compute loss only for hard examples
         hard_loss = self.base_loss(hard_inputs, hard_targets)
 
-        # Aggregate
-        if self.reduction == 'mean':
-            return hard_loss.mean() if hard_loss.dim() > 0 else hard_loss
-        elif self.reduction == 'sum':
-            return hard_loss.sum() if hard_loss.dim() > 0 else hard_loss
-        return hard_loss
+        return _apply_reduction(hard_loss, self.reduction)
 
     def get_hard_mask(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Get boolean mask indicating which samples are selected as hard examples.
-
-        Useful for debugging or visualization.
-
-        Returns:
-            Boolean mask of shape [B], True for hard examples
-        """
+        """Get boolean mask indicating hard example selection."""
         batch_size = inputs.size(0)
-
-        with torch.no_grad():
-            original_reduction = getattr(self.base_loss, 'reduction', None)
-            if original_reduction is not None:
-                self.base_loss.reduction = 'none'
-
-            per_sample_loss = self.base_loss(inputs, targets)
-
-            if original_reduction is not None:
-                self.base_loss.reduction = original_reduction
-
-        if per_sample_loss.dim() > 1:
-            per_sample_loss = per_sample_loss.mean(dim=-1)
-
-        num_hard = max(int(batch_size * self.hard_ratio), min(self.min_hard_num, batch_size))
-        num_hard = min(num_hard, batch_size)
-
-        _, hard_indices = torch.topk(per_sample_loss, num_hard, largest=True, sorted=False)
+        per_sample_loss = self._compute_per_sample_loss(inputs, targets)
+        hard_indices = self._select_hard_indices(per_sample_loss)
 
         mask = torch.zeros(batch_size, dtype=torch.bool, device=inputs.device)
         mask[hard_indices] = True
         return mask
+
+
+# Loss type aliases for convenience
+_LOSS_ALIASES = {'ce': 'cross_entropy'}
 
 
 def create_loss(
@@ -277,12 +199,11 @@ def create_loss(
     ohem_hard_ratio: float = 0.25,
     ohem_min_hard_num: int = 4
 ) -> nn.Module:
-    """
-    Factory function to create loss function
+    """Factory function to create loss function.
 
     Args:
-        loss_type: 'focal', 'label_smoothing', 'combined', 'cross_entropy',
-                   'ohem_focal', 'ohem_ce', or 'ohem_combined'
+        loss_type: One of 'focal', 'label_smoothing', 'combined', 'cross_entropy',
+                   'ohem_focal', 'ohem_ce', 'ohem_combined'
         alpha: Focal loss alpha parameter
         gamma: Focal loss gamma parameter
         label_smoothing: Label smoothing factor
@@ -291,7 +212,7 @@ def create_loss(
         ohem_min_hard_num: Minimum number of hard examples for OHEM
 
     Returns:
-        Loss module
+        Configured loss module
 
     Raises:
         ValueError: If loss_type is not recognized
@@ -299,9 +220,8 @@ def create_loss(
     # Handle OHEM variants
     if loss_type.startswith('ohem_'):
         base_type = loss_type[5:]  # Remove 'ohem_' prefix
-        # Map aliases to full names
-        type_aliases = {'ce': 'cross_entropy'}
-        base_type = type_aliases.get(base_type, base_type)
+        base_type = _LOSS_ALIASES.get(base_type, base_type)
+
         if base_type not in _LOSS_CREATORS:
             raise ValueError(f"Unknown OHEM base loss type: {base_type}")
 
