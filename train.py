@@ -23,10 +23,13 @@ Multi-GPU Usage:
 
 import argparse
 import os
+import random
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -585,6 +588,35 @@ class Trainer:
         self.logger.info("Training completed!")
 
 
+def set_seed(seed: int = 42, rank: int = 0) -> None:
+    """
+    Set random seeds for reproducibility.
+
+    Different seeds for each rank in distributed training to avoid
+    identical data augmentation across ranks.
+
+    Args:
+        seed: Base random seed (default: 42)
+        rank: Process rank for distributed training (default: 0)
+    """
+    # Offset seed by rank to avoid identical augmentation in DDP
+    rank_seed = seed + rank
+
+    random.seed(rank_seed)
+    np.random.seed(rank_seed)
+    torch.manual_seed(rank_seed)
+    torch.cuda.manual_seed(rank_seed)
+    torch.cuda.manual_seed_all(rank_seed)  # For multi-GPU
+
+    # Deterministic behavior for reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # Note: torch.use_deterministic_algorithms(True) may impact performance
+    # and is not always compatible with all operations. Enable with caution.
+    # torch.use_deterministic_algorithms(True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Train CryTransformer model with DDP support'
@@ -605,6 +637,8 @@ def main():
                         help='Local rank for distributed training (set automatically by torchrun)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42)')
 
     # Model architecture overrides
     parser.add_argument('--d_model', type=int, default=None,
@@ -619,6 +653,10 @@ def main():
     rank, world_size, device = setup_distributed()
     # Configure root logger - all modules will inherit this config
     logger = setup_logger(rank, name=None)
+
+    # Set random seed for reproducibility
+    set_seed(args.seed, rank)
+    logger.info(f"Random seed set to {args.seed} (rank offset: {rank})")
 
     try:
         # Load config
@@ -678,6 +716,9 @@ def main():
         else:
             train_sampler = CrySampler(train_dataset, cry_rate=config.dataset.cry_rate, shuffle=True)
 
+        # Create worker init function with seed for reproducibility
+        worker_init = partial(worker_init_fn, base_seed=args.seed) if config.training.num_workers > 0 else None
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.training.batch_size,
@@ -685,7 +726,7 @@ def main():
             num_workers=config.training.num_workers,
             pin_memory=config.training.pin_memory and device.type == 'cuda',
             collate_fn=collate_fn,
-            worker_init_fn=worker_init_fn if config.training.num_workers > 0 else None,
+            worker_init_fn=worker_init,
             persistent_workers=False,  # Disable to avoid deadlock in DDP
             drop_last=True  # Important for DDP: avoid uneven batch sizes
         )
@@ -698,7 +739,7 @@ def main():
                 num_workers=config.training.num_workers,
                 pin_memory=config.training.pin_memory and device.type == 'cuda',
                 collate_fn=collate_fn,
-                worker_init_fn=worker_init_fn if config.training.num_workers > 0 else None,
+                worker_init_fn=worker_init,
                 persistent_workers=False
             )
 

@@ -45,7 +45,7 @@ def collate_fn(batch: List[Tuple[np.ndarray, str]]) -> Tuple[torch.Tensor, torch
     return features, label_indices
 
 
-def worker_init_fn(worker_id: int):
+def worker_init_fn(worker_id: int, base_seed: int = 42):
     """
     Initialize worker with unique seed for reproducibility.
 
@@ -54,16 +54,17 @@ def worker_init_fn(worker_id: int):
 
     Args:
         worker_id: Worker index (0 to num_workers-1)
+        base_seed: Base random seed for reproducibility (default: 42)
 
     Example:
         >>> loader = DataLoader(
         ...     dataset,
         ...     num_workers=4,
-        ...     worker_init_fn=worker_init_fn
+        ...     worker_init_fn=partial(worker_init_fn, base_seed=42)
         ... )
     """
-    # Use os.getpid() to ensure different seeds across processes
-    worker_seed = (os.getpid() * 1000 + worker_id) % (2**32)
+    # Use base_seed and worker_id for reproducible worker seeds
+    worker_seed = (base_seed * 10000 + worker_id) % (2**32)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 

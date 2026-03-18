@@ -390,6 +390,9 @@ class TrainingConfig:
     val_interval: int = 1
     save_best_only: bool = True
 
+    # Random seed for reproducibility
+    seed: int = 42
+
     # Optimizer settings
     optimizer: str = 'adamw'  # 'adam', 'adamw', 'sgd'
     scheduler: str = 'cosine'  # 'step', 'cosine', 'plateau', 'cosine_warmup', 'none'
