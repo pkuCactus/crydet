@@ -285,9 +285,11 @@ class Trainer:
                     samples_per_sec = (batch_idx + 1) * self.train_cfg.batch_size / elapsed_s
                     throughput_info = f", {samples_per_sec:.1f} samples/s"
 
+                lr = self.optimizer.param_groups[0]['lr']
                 self.logger.info(
                     f"Epoch [{self.current_epoch}] Batch [{batch_idx + 1}/{num_batches}] "
-                    f"Loss: {unscaled_loss:.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%{throughput_info}"
+                    f"Loss: {unscaled_loss:.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%, "
+                    f"LR: {lr:.6f}{throughput_info}"
                 )
 
             # TensorBoard logging
@@ -528,9 +530,10 @@ class Trainer:
             train_metrics = self._train_epoch()
 
             if self.rank == 0:
+                lr = self.optimizer.param_groups[0]['lr']
                 self.logger.info(
                     f"Epoch {epoch}: Train Loss={train_metrics['loss']:.4f}, "
-                    f"Acc={train_metrics['accuracy']:.4f}, F1={train_metrics['f1']:.4f}"
+                    f"Acc={train_metrics['accuracy']:.4f}, F1={train_metrics['f1']:.4f}, LR={lr:.6f}"
                 )
 
                 if self.writer:
