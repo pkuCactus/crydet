@@ -2,6 +2,8 @@ import random
 
 import numpy as np
 
+EPS = 1e-8
+
 
 def get_db(y: np.ndarray, eps: float = 1e-8) -> np.float64:
     """
@@ -93,9 +95,10 @@ def gain(y: np.ndarray, ref_db: float, abs: bool = False) -> np.ndarray:
     gain_energy = 10 ** (ref_db / 20)
     if abs:
         ori_energy = max(np.mean(y ** 2), 1e-8) ** 0.5
-        y_gain = y / ori_energy * gain_energy
+        y_gain = y / (ori_energy + EPS) * gain_energy
     else:
         y_gain = y * gain_energy
+    y_gain = np.nan_to_num(y_gain)
     y_gain = np.clip(y_gain, -1, 1)
     return y_gain
 
