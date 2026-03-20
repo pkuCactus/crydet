@@ -526,6 +526,12 @@ class Trainer:
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Distributed: {self.is_distributed} (world_size={self.world_size})")
 
+        # Initialize scheduler: sync optimizer lr before epoch 0.
+        # Without this, the optimizer starts with base_lr (from __init__), but the
+        # scheduler at step 0 gives lr≈0, causing epoch 0 to train at max lr.
+        if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps == 0:
+            self.scheduler.step(epoch=0)
+
         for epoch in range(self.train_cfg.num_epochs):
             self.current_epoch = epoch
             should_stop = False
@@ -542,6 +548,11 @@ class Trainer:
                 if self.writer:
                     for key, value in train_metrics.items():
                         self.writer.add_scalar(f'train/{key}', value, epoch)
+
+            # Step epoch-based WarmupCosineScheduler every epoch on all ranks.
+            # Use epoch+1 so the lr is set for the *upcoming* epoch, not the current one.
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps == 0:
+                self.scheduler.step(epoch=epoch + 1)
 
             if self.val_loader is not None and epoch % self.train_cfg.val_interval == 0:
                 val_metrics = self._validate()
@@ -560,11 +571,7 @@ class Trainer:
                     if self.scheduler is not None:
                         if isinstance(self.scheduler, ReduceLROnPlateau):
                             self.scheduler.step(val_metrics['f1'])
-                        elif isinstance(self.scheduler, WarmupCosineScheduler):
-                            # WarmupCosineScheduler is stepped per-step or per-epoch
-                            if self.train_cfg.warmup_steps == 0:
-                                self.scheduler.step(epoch=epoch)
-                        else:
+                        elif not isinstance(self.scheduler, WarmupCosineScheduler):
                             self.scheduler.step()
 
                     should_stop = self._check_early_stopping(val_metrics['f1'], epoch)
