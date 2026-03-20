@@ -31,27 +31,25 @@ flowchart TD
         M -->|非Cry: 60%| N
         M -->|不增强| O["跳过效果链"]
 
-        N --> P["Pitch 50%"]
-        P --> Q["Reverb 80%"]
-        Q --> R["Phaser 50%"]
-        R --> S{非Cry?}
-        S -->|是| T["Echo 50%"]
-        S -->|否| U["跳过Echo"]
-        T --> V["噪声注入 10%"]
-        U --> V
-        O --> V
+        N --> P["选择效果\nPitch/Reverb/Phaser\n/TimeStretch/Echo"]
+        P --> Q{效果数 > 3?}
+        Q -->|是| R["分两组执行\n降低内存占用"]
+        Q -->|否| S["一次执行"]
+        R --> T["噪声注入 10%"]
+        S --> T
+        O --> T
 
-        V --> W{Mixup后置?}
-        W -->|是| X["Mixup增强"]
-        W -->|否| Y["跳过"]
-        X --> Z["动态增益调整"]
-        Y --> Z
+        T --> U{Mixup后置?}
+        U -->|是| V["Mixup增强"]
+        U -->|否| W["跳过"]
+        V --> X["动态增益调整"]
+        W --> X
     end
 
     subgraph Output["输出阶段"]
-        Z --> AA["增强后波形\n5s @ 16kHz"]
+        X --> AA["增强后波形\n5s @ 16kHz"]
         AA --> AB["特征提取\nFeatureExtractor"]
-        AB --> AC["模型训练输入\nT, F"]
+        AB --> AC["模型训练输入\n[T, F]"]
     end
 
     style DataLoading fill:#e1f5fe,stroke:#0277bd
@@ -84,13 +82,20 @@ sequenceDiagram
 
     Note over A: Step 3: Sox效果链
     alt Cry:90%概率 或 非Cry:60%概率
-        A->>S: 构建效果链
+        A->>S: 选择效果列表
         S->>S: Pitch(50%概率)
         S->>S: Reverb(80%概率)
         S->>S: Phaser(50%概率)
+        S->>S: TimeStretch(配置概率，默认0)
 
         alt 非Cry样本
             S->>S: Echo(50%概率)
+        end
+
+        alt 选中效果数 > 3
+            S->>S: 分两组执行，降低内存
+        else 效果数 ≤ 3
+            S->>S: 一次执行
         end
 
         S-->>A: 效果链处理后的波形
@@ -98,7 +103,7 @@ sequenceDiagram
 
     Note over A: Step 4: 噪声注入(10%概率)
     alt 10%概率
-        A->>N: 添加白噪声(SNR 10-30dB)
+        A->>N: 添加噪声(白/粉红/环境, SNR 5-25dB)
         N-->>A: 加噪波形
     end
 
@@ -110,7 +115,7 @@ sequenceDiagram
 
     Note over A: Step 6: 动态增益(90%概率)
     alt 90%概率
-        A->>A: 增益调整\n90%: 高斯衰减\n10%: 小幅增益
+        A->>A: 增益调整\n90%: 高斯衰减\n10%: 小幅增益(0-10dB)
     end
 
     A-->>D: 增强后波形
@@ -131,7 +136,7 @@ sequenceDiagram
 flowchart TD
     A["do_mixup\ny, label"] --> B{标签判断}
 
-    B -->|Cry| C["Mixup率\nN0.3, 0.15\n裁剪0.1-0.65"]
+    B -->|Cry| C["Mixup率\nN(0.3, 0.15)\n裁剪0.1-0.65"]
     B -->|非Cry| D["Mixup率\n均匀随机\n0.0-1.0"]
 
     C --> E[选择混合样本]
@@ -165,31 +170,29 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    subgraph Chain["Sox Effect Chain (随机顺序应用)"]
-        direction LR
-
-        P[Pitch<br/>50%概率<br/>-2~+2半音]
+    subgraph Selection["效果选择（独立概率）"]
+        direction TB
+        P[Pitch<br/>50%概率<br/>-4~+4半音]
         R[Reverb<br/>80%概率<br/>随机混响参数]
         Ph[Phaser<br/>50%概率<br/>随机相位参数]
-        E[Echo<br/>50%概率<br/>单回声效果]
-
-        P --> R
-        R --> Ph
-        Ph --> E
+        TS[TimeStretch<br/>配置概率，默认0<br/>0.8~1.2速度因子]
+        E[Echo<br/>50%概率<br/>仅非Cry]
     end
 
-    subgraph Conditions["应用条件"]
+    subgraph Execution["效果执行（内存优化）"]
         direction TB
-        C1[Cry样本: 90%概率应用]
-        C2[非Cry样本: 60%概率应用]
-        C3[非Cry: 可能包含Echo]
+        EX1{"效果数 > 3?"}
+        EX1 -->|是| G1["前半组执行"]
+        G1 --> G2["后半组执行"]
+        EX1 -->|否| G3["一次执行"]
     end
 
-    Chain --- Conditions
+    Selection --> Execution
 
     style P fill:#e3f2fd,stroke:#1976d2
     style R fill:#f3e5f5,stroke:#7b1fa2
     style Ph fill:#e8f5e8,stroke:#388e3c
+    style TS fill:#fce4ec,stroke:#c62828
     style E fill:#fff3e0,stroke:#f57c00
 ```
 
@@ -197,7 +200,7 @@ flowchart LR
 
 #### Pitch (音高变换)
 ```python
-pitch_rate = (random() - 0.5) * 4  # 范围: -2 到 +2 半音
+pitch_rate = (random() - 0.5) * 8  # 范围: -4 到 +4 半音
 ```
 
 #### Reverb (混响)
@@ -221,6 +224,29 @@ pitch_rate = (random() - 0.5) * 4  # 范围: -2 到 +2 半音
     'speed': random() * 1.9 + 0.1,            # 0.1-2.0 Hz
     'modulation_shape': random(['sinusoidal', 'triangular'])
 }
+```
+
+#### TimeStretch (时间伸缩)
+```python
+duration_factor = random.uniform(0.8, 1.2)  # <1=加速, >1=减速
+
+# 算法选择：
+# 0.9~1.1: sox stretch (SOLA，适合小幅变化)
+if 0.9 <= duration_factor <= 1.1:
+    tfm.stretch(duration_factor, window=random.uniform(15, 25))
+# 其他: sox tempo (WSOLA，适合大幅变化)
+else:
+    speed_factor = 1.0 / duration_factor
+    # 确保 speed_factor 不落在 stretch 的最佳范围内
+    if 0.9 <= speed_factor <= 1.1:
+        speed_factor = 1.11
+    tfm.tempo(speed_factor)
+```
+
+**注意**：TimeStretch 默认概率为 0，可在配置文件中启用：
+```yaml
+augmentation:
+  time_stretch_prob: 0.3
 ```
 
 #### Echo (回声 - 仅非Cry)
@@ -247,6 +273,7 @@ pitch_rate = (random() - 0.5) * 4  # 范围: -2 到 +2 半音
 | `reverb_prob` | 0.8 | 混响效果概率 |
 | `phaser_prob` | 0.5 | 相位器效果概率 |
 | `echo_prob` | 0.5 | 回声效果概率（仅非Cry） |
+| `time_stretch_prob` | 0.0 | 时间伸缩效果概率（默认禁用） |
 | `noise_prob` | 0.1 | 噪声注入概率 |
 | `gain_prob` | 0.9 | 动态增益调整概率 |
 
@@ -260,6 +287,19 @@ pitch_rate = (random() - 0.5) * 4  # 范围: -2 到 +2 半音
 | `other_mix_prob` | 0.3 | 非Cry样本Mixup概率 |
 | `mix_front_prob` | 0.7 | Mixup前置（效果链之前）概率 |
 
+### NoiseConfig
+
+| 参数 | 默认值 | 说明 |
+|-----|-------|------|
+| `white_noise_prob` | 0.3 | 白噪声权重 |
+| `pink_noise_prob` | 0.4 | 粉红噪声权重 |
+| `ambient_noise_prob` | 0.3 | 环境噪声权重（需配置文件列表） |
+| `snr_min` | 5.0 | 最小信噪比 (dB) |
+| `snr_max` | 25.0 | 最大信噪比 (dB) |
+| `ambient_noise_dir` | None | 环境噪声文件目录 |
+| `ambient_noise_files` | () | 环境噪声文件列表 |
+| `pink_noise_alpha` | 1.0 | 粉红噪声 1/f^alpha 参数 |
+
 ## 标签感知增强策略
 
 ### 增强策略对比
@@ -270,8 +310,8 @@ flowchart TB
         direction TB
         C1[时间反转: ❌ 不应用]
         C2["Mixup: ✅ 30%概率\n混合率: N(0.3, 0.15)\n能量约束: 混合样本低3-10dB"]
-        C3["Sox效果链: ✅ 90%概率\nPitch → Reverb → Phaser\n❌ 不包含Echo"]
-        C4[噪声注入: 10%概率 SNR 10-30dB]
+        C3["Sox效果链: ✅ 90%概率\nPitch/Reverb/Phaser/TimeStretch\n❌ 不包含Echo"]
+        C4["噪声注入: 10%概率\n白/粉红/环境噪声 SNR 5-25dB"]
         C5["动态增益: 90%概率\n模拟不同距离/音量"]
 
         C1 --> C2 --> C3 --> C4 --> C5
@@ -281,8 +321,8 @@ flowchart TB
         direction TB
         N1["时间反转: ✅ 50%概率\n增加时间不变性"]
         N2["Mixup: ✅ 30%概率\n混合率: 均匀随机\n约束: 仅非Cry样本"]
-        N3["Sox效果链: ✅ 60%概率\nPitch → Reverb → Phaser\n✅ 包含Echo"]
-        N4[噪声注入: 10%概率]
+        N3["Sox效果链: ✅ 60%概率\nPitch/Reverb/Phaser/TimeStretch\n✅ 包含Echo"]
+        N4["噪声注入: 10%概率"]
         N5[动态增益: 90%概率]
 
         N1 --> N2 --> N3 --> N4 --> N5
@@ -290,6 +330,21 @@ flowchart TB
 
     style Cry fill:#ffebee,stroke:#c62828
     style NonCry fill:#e3f2fd,stroke:#1565c0
+```
+
+## 内存优化：效果分组执行
+
+Sox的时间伸缩（WSOLA算法）在处理长音频时内存占用较大。为降低内存峰值，当选中效果超过3个时，自动分成两组执行：
+
+```
+选中效果: [pitch, reverb, phaser, time_stretch]  (4个)
+    ↓
+第1组: [pitch, reverb]    → sox执行 → 中间波形
+第2组: [phaser, time_stretch] → sox执行 → 最终波形
+
+选中效果: [pitch, reverb, phaser]  (3个，不分组)
+    ↓
+一次执行: [pitch, reverb, phaser] → sox执行 → 最终波形
 ```
 
 ## 数据流示例
@@ -305,7 +360,7 @@ flowchart TB
 │    └── 加载随机哭声片段                  │
 │    └── 能量约束: 降低8dB                │
 │    └── 混合位置: 随机                   │
-│  - Sox效果链: 应用                      │
+│  - Sox效果链: 应用 (90%概率)             │
 │    └── pitch(-1.2半音) ► reverb        │
 │  - 噪声注入: 跳过 (90%跳过)              │
 │  - Mixup后置: 跳过 (已前置)              │
@@ -324,9 +379,9 @@ flowchart TB
 │  OtherSample: "电视声音.wav"            │
 │  - 是否反转: 是 (50%概率)               │
 │  - Mixup前置: 否 (30%概率)              │
-│  - Sox效果链: 应用                      │
+│  - Sox效果链: 应用 (60%概率)             │
 │    └── phaser ► echo(50ms) ► reverb    │
-│  - 噪声注入: 添加白噪声 (SNR 15dB)       │
+│  - 噪声注入: 添加粉红噪声 (SNR 15dB)     │
 │  - Mixup后置: 是                        │
 │    └── 加载随机非哭声片段                │
 │    └── 无能量约束                       │
@@ -347,4 +402,10 @@ flowchart TB
 
 4. **效果链动态组合**: 效果应用顺序随机，增加组合多样性
 
-5. **时间反转数据增强**: 仅应用于非Cry，增加时间不变性训练
+5. **内存优化分组**: 效果数超过3个时自动分两组执行，避免Sox时间伸缩算法的内存峰值问题
+
+6. **时间伸缩算法自适应选择**: 根据伸缩因子自动选择 SOLA (stretch) 或 WSOLA (tempo) 算法，确保最优音质
+
+7. **时间反转数据增强**: 仅应用于非Cry，增加时间不变性训练
+
+8. **多类型噪声注入**: 支持白噪声、粉红噪声和环境采样噪声，SNR范围5-25dB
