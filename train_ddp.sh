@@ -16,6 +16,8 @@ EPOCHS=""
 BATCH_SIZE=""
 LR=""
 NGPU=""
+LOG_FILE=""
+SEED=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -48,6 +50,14 @@ while [[ $# -gt 0 ]]; do
             NGPU="$2"
             shift 2
             ;;
+        --log_file)
+            LOG_FILE="$2"
+            shift 2
+            ;;
+        --seed)
+            SEED="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -59,6 +69,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --batch_size N        Batch size per GPU (overrides config)"
             echo "  --lr LR               Learning rate (overrides config)"
             echo "  --ngpu N              Number of GPUs to use (default: auto-detect)"
+            echo "  --log_file PATH       Path to log file (optional, logs to console only if not set)"
+            echo "  --seed N              Random seed for reproducibility (default: 42)"
             echo ""
             echo "Examples:"
             echo "  # Single GPU training (automatic)"
@@ -102,6 +114,8 @@ echo "Config:       $CONFIG"
 echo "Train list:   $TRAIN_LIST"
 echo "Val list:     ${VAL_LIST:-None}"
 echo "GPUs:         $NGPU"
+echo "Log file:     ${LOG_FILE:-None}"
+echo "Seed:         ${SEED:-42}"
 echo "=============================================="
 
 # Build command
@@ -121,6 +135,14 @@ fi
 
 if [ -n "$LR" ]; then
     CMD="$CMD --lr $LR"
+fi
+
+if [ -n "$LOG_FILE" ]; then
+    CMD="$CMD --log_file $LOG_FILE"
+fi
+
+if [ -n "$SEED" ]; then
+    CMD="$CMD --seed $SEED"
 fi
 
 # Launch training

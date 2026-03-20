@@ -52,7 +52,7 @@ from model.ema import ExponentialMovingAverage
 from model.loss import create_loss
 from model.scheduler import WarmupCosineScheduler
 from model.distributed import setup_distributed, cleanup_distributed
-from utils import setup_logger, get_logger
+from utils import setup_logger, setup_file_logger, get_logger
 
 
 class Trainer:
@@ -639,6 +639,8 @@ def main():
                         help='Resume from checkpoint')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('--log_file', type=str, default=None,
+                        help='Path to log file (logs to console only if not specified)')
 
     # Model architecture overrides
     parser.add_argument('--d_model', type=int, default=None,
@@ -652,7 +654,10 @@ def main():
     # Setup distributed training
     rank, world_size, device = setup_distributed()
     # Configure root logger - all modules will inherit this config
-    logger = setup_logger(rank, name=None)
+    if args.log_file:
+        logger = setup_file_logger(args.log_file, rank=rank, name=None)
+    else:
+        logger = setup_logger(rank, name=None)
 
     # Set random seed for reproducibility
     set_seed(args.seed, rank)
