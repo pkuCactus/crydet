@@ -107,8 +107,9 @@ class WarmupCosineScheduler:
             Learning rate for current step
         """
         if self.current_step < self.total_warmup_steps:
-            # Warmup phase: linear increase
-            return self.base_lr * (self.current_step / max(1, self.total_warmup_steps))
+            # Warmup phase: linear increase from min_lr to base_lr
+            progress = self.current_step / max(1, self.total_warmup_steps)
+            return self.min_lr + (self.base_lr - self.min_lr) * progress
         else:
             # Cosine decay phase
             progress = (self.current_step - self.total_warmup_steps) / max(
@@ -207,8 +208,9 @@ class LinearWarmupPolyDecayScheduler:
     def _get_lr(self) -> float:
         """Calculate current learning rate."""
         if self.current_step < self.warmup_steps:
-            # Linear warmup
-            return self.base_lr * (self.current_step / max(1, self.warmup_steps))
+            # Linear warmup from min_lr to base_lr
+            progress = self.current_step / max(1, self.warmup_steps)
+            return self.min_lr + (self.base_lr - self.min_lr) * progress
         else:
             # Polynomial decay
             progress = (self.current_step - self.warmup_steps) / max(
