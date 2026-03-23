@@ -25,6 +25,7 @@ import argparse
 import os
 import random
 import sys
+import time
 from collections import Counter
 from functools import partial
 from pathlib import Path
@@ -68,7 +69,7 @@ class Trainer:
         device: torch.device,
         rank: int = 0,
         world_size: int = 1,
-        checkpoint: Optional[Dict] = None
+        checkpoint_path: Optional[str] = None
     ):
         self.config = config
         self.train_loader = train_loader
@@ -93,6 +94,7 @@ class Trainer:
 
         # Training state
         self.current_epoch = 0
+        self.start_epoch = 0  # For resuming training
         self.best_val_f1 = 0.0
         self.patience_counter = 0
         self.global_step = 0
@@ -124,31 +126,56 @@ class Trainer:
         # Use root logger (configured in main) - inherits handlers from root
         self.logger = get_logger(__name__)
 
-        # Restore from checkpoint if provided
-        if checkpoint is not None:
-            self._restore_from_checkpoint(checkpoint)
+        # Load checkpoint if provided (handles model weights and training state)
+        if checkpoint_path is not None:
+            self._load_checkpoint(checkpoint_path)
+
+    def _load_checkpoint(self, checkpoint_path: str):
+        """Load checkpoint from file and restore all training state."""
+        if self.rank == 0:
+            self.logger.info(f"Loading checkpoint from: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self._restore_from_checkpoint(checkpoint)
 
     def _restore_from_checkpoint(self, checkpoint: Dict):
-        """Restore training state from checkpoint."""
+        """Restore model weights and training state from checkpoint dict."""
+        # Restore model weights
+        if 'model_state_dict' in checkpoint:
+            self.raw_model.load_state_dict(checkpoint['model_state_dict'])
+            if self.rank == 0:
+                self.logger.info("Restored model weights")
+
+        # Restore epoch (for resuming training loop)
+        if 'epoch' in checkpoint:
+            self.current_epoch = checkpoint['epoch']
+            self.start_epoch = self.current_epoch
+            if self.rank == 0:
+                self.logger.info(f"Restored epoch: {self.current_epoch}")
+
         # Restore optimizer state
         if 'optimizer_state_dict' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.logger.info("Restored optimizer state")
+            if self.rank == 0:
+                self.logger.info("Restored optimizer state")
 
         # Restore EMA state
         if self.ema is not None and 'ema_state_dict' in checkpoint:
             self.ema.load_state_dict(checkpoint['ema_state_dict'])
-            self.logger.info("Restored EMA state")
+            if self.rank == 0:
+                self.logger.info("Restored EMA state")
 
         # Restore scheduler state
         if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            self.logger.info("Restored scheduler state")
+            if self.rank == 0:
+                self.logger.info("Restored scheduler state")
 
         # Restore global step
         if 'global_step' in checkpoint:
             self.global_step = checkpoint['global_step']
-            self.logger.info(f"Restored global_step: {self.global_step}")
+            if self.rank == 0:
+                self.logger.info(f"Restored global_step: {self.global_step}")
 
         # Restore best validation metric
         if 'best_val_f1' in checkpoint:
@@ -527,10 +554,13 @@ class Trainer:
         dist.broadcast(should_stop_tensor, src=0)
         return should_stop_tensor.item() != 0
 
-    def train(self, start_epoch: int = 0):
+    def train(self):
         """Main training loop"""
+        start_epoch = self.start_epoch
+        total_epochs = self.train_cfg.num_epochs
+
         self.logger.info("Starting training...")
-        self.logger.info(f"Total epochs: {self.train_cfg.num_epochs}, start epoch: {start_epoch}")
+        self.logger.info(f"Total epochs: {total_epochs}, start epoch: {start_epoch}")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Distributed: {self.is_distributed} (world_size={self.world_size})")
 
@@ -543,18 +573,31 @@ class Trainer:
             else:
                 # Step-based warmup: initialize lr to the correct value for global_step
                 self.scheduler.step(step=self.global_step)
+        epoch_times = []  # wall-clock seconds per epoch for ETA estimation
 
-        for epoch in range(start_epoch, self.train_cfg.num_epochs):
+        for epoch in range(start_epoch, total_epochs):
             self.current_epoch = epoch
             should_stop = False
 
+            epoch_start = time.time()
             train_metrics = self._train_epoch()
+            epoch_elapsed = time.time() - epoch_start
+            epoch_times.append(epoch_elapsed)
 
             if self.rank == 0:
                 lr = self.optimizer.param_groups[0]['lr']
+
+                # ETA: use average of recent epoch times
+                avg_epoch_time = sum(epoch_times[-5:]) / len(epoch_times[-5:])
+                remaining_epochs = total_epochs - (epoch + 1)
+                eta_seconds = avg_epoch_time * remaining_epochs
+                eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+                elapsed_str = time.strftime("%H:%M:%S", time.gmtime(sum(epoch_times)))
+
                 self.logger.info(
-                    f"Epoch {epoch}: Train Loss={train_metrics['loss']:.4f}, "
-                    f"Acc={train_metrics['accuracy']:.4f}, F1={train_metrics['f1']:.4f}, LR={lr:.6f}"
+                    f"Epoch {epoch}/{total_epochs - 1}: Train Loss={train_metrics['loss']:.4f}, "
+                    f"Acc={train_metrics['accuracy']:.4f}, F1={train_metrics['f1']:.4f}, LR={lr:.6f} "
+                    f"| epoch={epoch_elapsed:.1f}s, elapsed={elapsed_str}, ETA={eta_str}"
                 )
 
                 if self.writer:
@@ -672,11 +715,9 @@ def main():
 
     # Setup distributed training
     rank, world_size, device = setup_distributed()
-    # Configure root logger - all modules will inherit this config
-    if args.log_file:
-        logger = setup_file_logger(args.log_file, rank=rank, name=None)
-    else:
-        logger = setup_logger(rank, name=None)
+
+    # Early logger setup (console only, will re-configure with file after run_dir is created)
+    logger = setup_logger(rank, name=None)
 
     # Set random seed for reproducibility
     set_seed(args.seed, rank)
@@ -708,6 +749,41 @@ def main():
             config.model.n_heads = args.n_heads
 
         config.model.__post_init__()
+
+        # Create unified output directory based on timestamp (only rank 0 creates, others use same path)
+        if rank == 0:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = Path("runs") / timestamp
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "checkpoints").mkdir(exist_ok=True)
+            (run_dir / "tensorboard").mkdir(exist_ok=True)
+            (run_dir / "logs").mkdir(exist_ok=True)
+            run_dir_str = str(run_dir.absolute())
+        else:
+            run_dir_str = None
+
+        # Broadcast run_dir to all ranks (for DDP)
+        if world_size > 1:
+            run_dir_list = [run_dir_str] if rank == 0 else [None]
+            dist.broadcast_object_list(run_dir_list, src=0)
+            run_dir_str = run_dir_list[0]
+
+        # Update config paths to use unified directory
+        config.training.checkpoint_dir = str(Path(run_dir_str) / "checkpoints")
+        config.training.log_dir = str(Path(run_dir_str) / "tensorboard")
+
+        # Auto-generate log_file if not specified
+        if args.log_file is None:
+            args.log_file = str(Path(run_dir_str) / "logs" / "train.log")
+
+        # Re-configure logger with file output (only rank 0 writes to file)
+        if rank == 0 and args.log_file:
+            logger = setup_file_logger(args.log_file, rank=rank, name=None)
+            logger.info(f"Training outputs saved to: {run_dir_str}")
+            logger.info(f"  Checkpoints: {config.training.checkpoint_dir}")
+            logger.info(f"  TensorBoard: {config.training.log_dir}")
+            logger.info(f"  Logs: {args.log_file}")
 
         # Load data
         if rank == 0:
@@ -780,23 +856,13 @@ def main():
         if rank == 0:
             print_model_summary(model)
 
-        # Resume from checkpoint if specified
-        checkpoint = None
-        start_epoch = 0
-        if args.resume:
-            if rank == 0:
-                logger.info(f"Resuming from checkpoint: {args.resume}")
-            checkpoint = torch.load(args.resume, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            start_epoch = checkpoint.get('epoch', 0)
-
         # Synchronize before training to ensure all ranks are ready
         if world_size > 1:
             dist.barrier()
 
-        # Create trainer and train
-        trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size, checkpoint)
-        trainer.train(start_epoch=start_epoch)
+        # Create trainer and train (checkpoint loading handled inside Trainer)
+        trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size, checkpoint_path=args.resume)
+        trainer.train()
 
     finally:
         cleanup_distributed()
