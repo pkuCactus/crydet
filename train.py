@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, ReduceLROnPlateau
@@ -142,11 +142,13 @@ class Trainer:
 
         # Restore scheduler state
         if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-            if isinstance(self.scheduler, WarmupCosineScheduler):
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            else:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             self.logger.info("Restored scheduler state")
+
+        # Restore global step
+        if 'global_step' in checkpoint:
+            self.global_step = checkpoint['global_step']
+            self.logger.info(f"Restored global_step: {self.global_step}")
 
         # Restore best validation metric
         if 'best_val_f1' in checkpoint:
@@ -310,7 +312,7 @@ class Trainer:
 
         total_loss, correct, total = self._aggregate_metrics(total_loss, correct, total)
 
-        epoch_loss = total_loss / len(self.train_loader)
+        epoch_loss = total_loss / (len(self.train_loader) * self.world_size)
         epoch_acc = correct / total
 
         if self.is_distributed:
@@ -361,81 +363,82 @@ class Trainer:
         if ema_active:
             self.ema.apply_shadow(self.raw_model)
 
-        self.model.eval()
+        try:
+            self.model.eval()
 
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        all_preds = []
-        all_targets = []
-        all_probs = []
+            total_loss = 0.0
+            correct = 0
+            total = 0
+            all_preds = []
+            all_targets = []
+            all_probs = []
 
-        num_batches = len(self.val_loader)
+            num_batches = len(self.val_loader)
 
-        for batch_idx, (features, targets) in enumerate(self.val_loader):
-            features = features.to(self.device)
-            targets = targets.to(self.device)
+            for batch_idx, (features, targets) in enumerate(self.val_loader):
+                features = features.to(self.device)
+                targets = targets.to(self.device)
 
-            outputs = self.model(features)
-            loss = self.criterion(outputs, targets)
+                outputs = self.model(features)
+                loss = self.criterion(outputs, targets)
 
-            total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+                total_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
 
-            probs = F.softmax(outputs, dim=1)[:, 1]
+                probs = F.softmax(outputs, dim=1)[:, 1]
 
-            all_preds.extend(predicted.cpu().numpy())
-            all_targets.extend(targets.cpu().numpy())
-            all_probs.extend(probs.cpu().numpy())
+                all_preds.extend(predicted.cpu().numpy())
+                all_targets.extend(targets.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
 
-            if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
-                current_loss = total_loss / (batch_idx + 1)
-                current_acc = 100. * correct / total
-                self.logger.info(
-                    f"Validation Batch [{batch_idx + 1}/{num_batches}] "
-                    f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%"
-                )
+                if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
+                    current_loss = total_loss / (batch_idx + 1)
+                    current_acc = 100. * correct / total
+                    self.logger.info(
+                        f"Validation Batch [{batch_idx + 1}/{num_batches}] "
+                        f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%"
+                    )
 
-        if self.is_distributed:
-            # Gather num_batches from all ranks for correct loss averaging
-            local_batches = len(self.val_loader)
-            batches_tensor = torch.tensor([local_batches], dtype=torch.long, device=self.device)
-            dist.all_reduce(batches_tensor, op=dist.ReduceOp.SUM)
-            total_batches = int(batches_tensor.item())
+            if self.is_distributed:
+                # Gather num_batches from all ranks for correct loss averaging
+                local_batches = len(self.val_loader)
+                batches_tensor = torch.tensor([local_batches], dtype=torch.long, device=self.device)
+                dist.all_reduce(batches_tensor, op=dist.ReduceOp.SUM)
+                total_batches = int(batches_tensor.item())
 
-            # Create tensor on CPU then move to device to avoid NCCL issue
-            metrics = torch.tensor([total_loss, correct, total])
-            if self.device.type == 'cuda':
-                metrics = metrics.cuda(self.device)
-            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-            total_loss, correct, total = metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
+                # Create tensor on CPU then move to device to avoid NCCL issue
+                metrics = torch.tensor([total_loss, correct, total])
+                if self.device.type == 'cuda':
+                    metrics = metrics.cuda(self.device)
+                dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+                total_loss, correct, total = metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 
-            all_preds = self._gather_lists(all_preds)
-            all_targets = self._gather_lists(all_targets)
-            all_probs = self._gather_lists(all_probs)
-        else:
-            total_batches = len(self.val_loader)
+                all_preds = self._gather_lists(all_preds)
+                all_targets = self._gather_lists(all_targets)
+                all_probs = self._gather_lists(all_probs)
+            else:
+                total_batches = len(self.val_loader)
 
-        val_loss = total_loss / max(total_batches, 1)
-        val_acc = correct / max(total, 1)
+            val_loss = total_loss / max(total_batches, 1)
+            val_acc = correct / max(total, 1)
 
-        f1 = precision = recall = auc = 0.0
-        if all_targets and all_preds:
-            from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
-            try:
-                f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-                precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
-                recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
-                auc = roc_auc_score(all_targets, all_probs)
-            except Exception as e:
-                self.logger.warning(f"Failed to compute metrics: {e}")
-                auc = 0.5
+            f1 = precision = recall = auc = 0.0
+            if all_targets and all_preds:
+                try:
+                    f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+                    precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+                    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+                    auc = roc_auc_score(all_targets, all_probs)
+                except Exception as e:
+                    self.logger.warning(f"Failed to compute metrics: {e}")
+                    auc = 0.5
 
-        # Restore original parameters after validation
-        if ema_active:
-            self.ema.restore(self.raw_model)
+        finally:
+            # Always restore original parameters after validation
+            if ema_active:
+                self.ema.restore(self.raw_model)
 
         return {
             'loss': val_loss,
@@ -464,6 +467,7 @@ class Trainer:
 
         checkpoint = {
             'epoch': self.current_epoch,
+            'global_step': self.global_step,
             'model_state_dict': self.raw_model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_f1': self.best_val_f1,
@@ -483,10 +487,7 @@ class Trainer:
 
         # Save scheduler state if available
         if self.scheduler is not None:
-            if isinstance(self.scheduler, WarmupCosineScheduler):
-                checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-            else:
-                checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
+            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
 
         path = os.path.join(self.train_cfg.checkpoint_dir, filename)
         torch.save(checkpoint, path)
@@ -505,7 +506,7 @@ class Trainer:
             self.best_val_f1 = val_f1
             self.patience_counter = 0
             if cfg.save_best_only:
-                self._save_checkpoint('best_model.pt', is_best=True)
+                self._save_checkpoint('best_model.pt')
         else:
             self.patience_counter += 1
             if cfg.early_stopping_patience and self.patience_counter >= cfg.early_stopping_patience:
@@ -526,20 +527,24 @@ class Trainer:
         dist.broadcast(should_stop_tensor, src=0)
         return should_stop_tensor.item() != 0
 
-    def train(self):
+    def train(self, start_epoch: int = 0):
         """Main training loop"""
         self.logger.info("Starting training...")
-        self.logger.info(f"Total epochs: {self.train_cfg.num_epochs}")
+        self.logger.info(f"Total epochs: {self.train_cfg.num_epochs}, start epoch: {start_epoch}")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Distributed: {self.is_distributed} (world_size={self.world_size})")
 
-        # Initialize scheduler: sync optimizer lr before epoch 0.
+        # Initialize scheduler: sync optimizer lr before the first epoch.
         # Without this, the optimizer starts with base_lr (from __init__), but the
-        # scheduler at step 0 gives lr≈0, causing epoch 0 to train at max lr.
-        if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps == 0:
-            self.scheduler.step(epoch=0)
+        # scheduler at step 0 gives lr≈min_lr, causing the first epoch to train at max lr.
+        if isinstance(self.scheduler, WarmupCosineScheduler):
+            if self.train_cfg.warmup_steps == 0:
+                self.scheduler.step(epoch=start_epoch)
+            else:
+                # Step-based warmup: initialize lr to the correct value for global_step
+                self.scheduler.step(step=self.global_step)
 
-        for epoch in range(self.train_cfg.num_epochs):
+        for epoch in range(start_epoch, self.train_cfg.num_epochs):
             self.current_epoch = epoch
             should_stop = False
 
@@ -791,8 +796,7 @@ def main():
 
         # Create trainer and train
         trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size, checkpoint)
-        trainer.current_epoch = start_epoch
-        trainer.train()
+        trainer.train(start_epoch=start_epoch)
 
     finally:
         cleanup_distributed()
