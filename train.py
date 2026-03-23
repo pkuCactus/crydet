@@ -316,6 +316,10 @@ class Trainer:
             start_time.record()
 
         for batch_idx, (features, targets) in enumerate(self.train_loader):
+            # Step step-based scheduler at the beginning of each batch
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps > 0:
+                self.scheduler.step(step=self.global_step)
+
             features = features.to(self.device)
             targets = targets.to(self.device)
 
@@ -355,10 +359,6 @@ class Trainer:
                 self.writer.add_scalar('train/loss_step', unscaled_loss, self.global_step)
                 self.writer.add_scalar('train/acc_step', correct/total, self.global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
-
-            # Step warmup cosine scheduler per step if using step-based warmup
-            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps > 0:
-                self.scheduler.step(step=self.global_step)
 
             self.global_step += 1
 
@@ -590,20 +590,15 @@ class Trainer:
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Distributed: {self.is_distributed} (world_size={self.world_size})")
 
-        # Initialize scheduler: sync optimizer lr before the first epoch.
-        # Without this, the optimizer starts with base_lr (from __init__), but the
-        # scheduler at step 0 gives lr≈min_lr, causing the first epoch to train at max lr.
-        if isinstance(self.scheduler, WarmupCosineScheduler):
-            if self.train_cfg.warmup_steps == 0:
-                self.scheduler.step(epoch=start_epoch)
-            else:
-                # Step-based warmup: initialize lr to the correct value for global_step
-                self.scheduler.step(step=self.global_step)
         eta_tracker = ETATracker(window_size=5)
 
         for epoch in range(start_epoch, total_epochs):
             self.current_epoch = epoch
             should_stop = False
+
+            # Step epoch-based scheduler at the beginning of each epoch
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps == 0:
+                self.scheduler.step(epoch=epoch)
 
             epoch_start = time.time()
             train_metrics = self._train_epoch()
@@ -623,11 +618,6 @@ class Trainer:
                 if self.writer:
                     for key, value in train_metrics.items():
                         self.writer.add_scalar(f'train/{key}', value, epoch)
-
-            # Step epoch-based WarmupCosineScheduler every epoch on all ranks.
-            # Use epoch+1 so the lr is set for the *upcoming* epoch, not the current one.
-            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps == 0:
-                self.scheduler.step(epoch=epoch + 1)
 
             if self.val_loader is not None and epoch % self.train_cfg.val_interval == 0:
                 val_metrics = self._validate()
