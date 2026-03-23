@@ -57,6 +57,34 @@ from model.distributed import setup_distributed, cleanup_distributed
 from utils import setup_logger, setup_file_logger, get_logger
 
 
+def format_duration(seconds: float) -> str:
+    """Format seconds to HH:MM:SS string."""
+    return time.strftime("%H:%M:%S", time.gmtime(seconds))
+
+
+class ETATracker:
+    """Track epoch times and estimate time remaining."""
+    def __init__(self, window_size: int = 5):
+        self.epoch_times: list[float] = []
+        self.window_size = window_size
+
+    def update(self, elapsed_seconds: float) -> None:
+        """Record elapsed time for an epoch."""
+        self.epoch_times.append(elapsed_seconds)
+
+    def estimate(self, remaining_epochs: int) -> tuple[str, str]:
+        """Estimate remaining time based on average epoch time.
+
+        Returns:
+            Tuple of (eta_string, elapsed_string) in HH:MM:SS format
+        """
+        recent_times = self.epoch_times[-self.window_size:]
+        avg_epoch_time = sum(recent_times) / len(recent_times)
+        eta_seconds = avg_epoch_time * remaining_epochs
+        elapsed_seconds = sum(self.epoch_times)
+        return format_duration(eta_seconds), format_duration(elapsed_seconds)
+
+
 class Trainer:
     """Trainer class for CryTransformer with DDP support"""
 
@@ -516,12 +544,13 @@ class Trainer:
         if self.scheduler is not None:
             checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
 
-        path = os.path.join(self.train_cfg.checkpoint_dir, filename)
+        checkpoint_dir = Path(self.train_cfg.checkpoint_dir)
+        path = checkpoint_dir / filename
         torch.save(checkpoint, path)
         self.logger.info(f"Checkpoint saved: {path}")
 
         if is_best:
-            best_path = os.path.join(self.train_cfg.checkpoint_dir, 'best_model.pt')
+            best_path = checkpoint_dir / 'best_model.pt'
             torch.save(checkpoint, best_path)
             self.logger.info(f"Best model saved: {best_path}")
 
@@ -573,7 +602,7 @@ class Trainer:
             else:
                 # Step-based warmup: initialize lr to the correct value for global_step
                 self.scheduler.step(step=self.global_step)
-        epoch_times = []  # wall-clock seconds per epoch for ETA estimation
+        eta_tracker = ETATracker(window_size=5)
 
         for epoch in range(start_epoch, total_epochs):
             self.current_epoch = epoch
@@ -582,17 +611,11 @@ class Trainer:
             epoch_start = time.time()
             train_metrics = self._train_epoch()
             epoch_elapsed = time.time() - epoch_start
-            epoch_times.append(epoch_elapsed)
+            eta_tracker.update(epoch_elapsed)
 
             if self.rank == 0:
                 lr = self.optimizer.param_groups[0]['lr']
-
-                # ETA: use average of recent epoch times
-                avg_epoch_time = sum(epoch_times[-5:]) / len(epoch_times[-5:])
-                remaining_epochs = total_epochs - (epoch + 1)
-                eta_seconds = avg_epoch_time * remaining_epochs
-                eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
-                elapsed_str = time.strftime("%H:%M:%S", time.gmtime(sum(epoch_times)))
+                eta_str, elapsed_str = eta_tracker.estimate(total_epochs - (epoch + 1))
 
                 self.logger.info(
                     f"Epoch {epoch}/{total_epochs - 1}: Train Loss={train_metrics['loss']:.4f}, "
