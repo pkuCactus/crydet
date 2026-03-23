@@ -25,6 +25,7 @@ import argparse
 import os
 import random
 import sys
+from collections import Counter
 from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
@@ -317,9 +318,15 @@ class Trainer:
             all_targets = self._gather_lists(all_targets)
 
         if all_targets and all_preds:
-            f1 = f1_score(all_targets, all_preds, average='macro')
-            precision = precision_score(all_targets, all_preds, average='macro')
-            recall = recall_score(all_targets, all_preds, average='macro')
+            f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+            precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+            recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+
+            # Log class distribution for diagnosis
+            if self.rank == 0 and self.current_epoch % 5 == 0:
+                target_counts = Counter(all_targets)
+                pred_counts = Counter(all_preds)
+                self.logger.info(f"Class distribution - Targets: {dict(target_counts)}, Predictions: {dict(pred_counts)}")
         else:
             f1 = precision = recall = 0.0
 
@@ -418,9 +425,9 @@ class Trainer:
         if all_targets and all_preds:
             from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
             try:
-                f1 = f1_score(all_targets, all_preds, average='macro')
-                precision = precision_score(all_targets, all_preds, average='macro')
-                recall = recall_score(all_targets, all_preds, average='macro')
+                f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+                precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+                recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
                 auc = roc_auc_score(all_targets, all_probs)
             except Exception as e:
                 self.logger.warning(f"Failed to compute metrics: {e}")
