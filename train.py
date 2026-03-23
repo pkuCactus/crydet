@@ -168,11 +168,15 @@ class Trainer:
 
     def _restore_from_checkpoint(self, checkpoint: Dict):
         """Restore model weights and training state from checkpoint dict."""
+        def _restore(key: str, restore_fn, name: str) -> None:
+            """Helper to restore state with logging."""
+            if key in checkpoint:
+                restore_fn(checkpoint[key])
+                if self.rank == 0:
+                    self.logger.info(f"Restored {name}")
+
         # Restore model weights
-        if 'model_state_dict' in checkpoint:
-            self.raw_model.load_state_dict(checkpoint['model_state_dict'])
-            if self.rank == 0:
-                self.logger.info("Restored model weights")
+        _restore('model_state_dict', self.raw_model.load_state_dict, "model weights")
 
         # Restore epoch (for resuming training loop)
         if 'epoch' in checkpoint:
@@ -181,31 +185,21 @@ class Trainer:
             if self.rank == 0:
                 self.logger.info(f"Restored epoch: {self.current_epoch}")
 
-        # Restore optimizer state
-        if 'optimizer_state_dict' in checkpoint:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if self.rank == 0:
-                self.logger.info("Restored optimizer state")
+        # Restore optimizer, EMA, scheduler states
+        _restore('optimizer_state_dict', self.optimizer.load_state_dict, "optimizer state")
 
-        # Restore EMA state
-        if self.ema is not None and 'ema_state_dict' in checkpoint:
-            self.ema.load_state_dict(checkpoint['ema_state_dict'])
-            if self.rank == 0:
-                self.logger.info("Restored EMA state")
+        if self.ema is not None:
+            _restore('ema_state_dict', self.ema.load_state_dict, "EMA state")
 
-        # Restore scheduler state
-        if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            if self.rank == 0:
-                self.logger.info("Restored scheduler state")
+        if self.scheduler is not None:
+            _restore('scheduler_state_dict', self.scheduler.load_state_dict, "scheduler state")
 
-        # Restore global step
+        # Restore global step and best metric
         if 'global_step' in checkpoint:
             self.global_step = checkpoint['global_step']
             if self.rank == 0:
                 self.logger.info(f"Restored global_step: {self.global_step}")
 
-        # Restore best validation metric
         if 'best_val_f1' in checkpoint:
             self.best_val_f1 = checkpoint['best_val_f1']
 
@@ -226,15 +220,18 @@ class Trainer:
         """Create optimizer."""
         cfg = self.train_cfg
         lr, wd = cfg.learning_rate, cfg.weight_decay
+        params = self.raw_model.parameters()
 
-        if cfg.optimizer == 'adamw':
-            return AdamW(self.raw_model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.98))
-        elif cfg.optimizer == 'adam':
-            return torch.optim.Adam(self.raw_model.parameters(), lr=lr, weight_decay=wd)
-        elif cfg.optimizer == 'sgd':
-            return torch.optim.SGD(self.raw_model.parameters(), lr=lr, momentum=0.9, weight_decay=wd)
-        else:
+        optimizers = {
+            'adamw': lambda: AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, 0.98)),
+            'adam': lambda: torch.optim.Adam(params, lr=lr, weight_decay=wd),
+            'sgd': lambda: torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd),
+        }
+
+        if cfg.optimizer not in optimizers:
             raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
+
+        return optimizers[cfg.optimizer]()
 
     def _create_scheduler(self):
         """Create learning rate scheduler."""
@@ -242,7 +239,6 @@ class Trainer:
         opt = self.optimizer
 
         if cfg.scheduler == 'cosine_warmup':
-            # Warmup + Cosine Decay
             return WarmupCosineScheduler(
                 optimizer=opt,
                 warmup_epochs=cfg.warmup_epochs,
@@ -252,13 +248,14 @@ class Trainer:
                 min_lr=cfg.min_lr,
                 warmup_steps=cfg.warmup_steps
             )
-        elif cfg.scheduler == 'cosine':
-            return CosineAnnealingWarmRestarts(opt, T_0=10, T_mult=2, eta_min=cfg.min_lr)
-        elif cfg.scheduler == 'plateau':
-            return ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5, verbose=True)
-        elif cfg.scheduler == 'step':
-            return torch.optim.lr_scheduler.StepLR(opt, step_size=30, gamma=0.1)
-        return None
+
+        schedulers = {
+            'cosine': lambda: CosineAnnealingWarmRestarts(opt, T_0=10, T_mult=2, eta_min=cfg.min_lr),
+            'plateau': lambda: ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5, verbose=True),
+            'step': lambda: torch.optim.lr_scheduler.StepLR(opt, step_size=30, gamma=0.1),
+        }
+
+        return schedulers.get(cfg.scheduler, lambda: None)()
 
     def _clip_gradients(self):
         """Clip gradients if configured."""
