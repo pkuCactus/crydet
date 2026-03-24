@@ -97,6 +97,8 @@ class Trainer:
         device: torch.device,
         rank: int = 0,
         world_size: int = 1,
+        checkpoint_dir: Optional[str] = None,
+        log_dir: Optional[str] = None,
         checkpoint_path: Optional[str] = None
     ):
         self.config = config
@@ -106,6 +108,8 @@ class Trainer:
         self.rank = rank
         self.world_size = world_size
         self.is_distributed = world_size > 1
+        self.checkpoint_dir = checkpoint_dir
+        self.log_dir = log_dir
 
         model = model.to(device)
         self.raw_model = model
@@ -131,11 +135,12 @@ class Trainer:
         # Scheduler (created after steps_per_epoch is known)
         self.scheduler = self._create_scheduler()
 
-        # TensorBoard writer (only on rank 0)
+        # TensorBoard writer (only on rank 0 when log_dir is provided)
         self.writer = None
-        if rank == 0:
-            self.writer = SummaryWriter(self.train_cfg.log_dir)
-            os.makedirs(self.train_cfg.checkpoint_dir, exist_ok=True)
+        if rank == 0 and log_dir is not None:
+            self.writer = SummaryWriter(log_dir)
+        if checkpoint_dir is not None:
+            os.makedirs(checkpoint_dir, exist_ok=True)
 
         # SWA
         self.swa_model = None
@@ -217,45 +222,60 @@ class Trainer:
         )
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
-        """Create optimizer."""
-        cfg = self.train_cfg
-        lr, wd = cfg.learning_rate, cfg.weight_decay
+        """Create optimizer from configuration."""
+        cfg = self.train_cfg.optimizer
         params = self.raw_model.parameters()
 
         optimizers = {
-            'adamw': lambda: AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, 0.98)),
-            'adam': lambda: torch.optim.Adam(params, lr=lr, weight_decay=wd),
-            'sgd': lambda: torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd),
+            'adamw': lambda: AdamW(
+                params, lr=cfg.lr, weight_decay=cfg.weight_decay,
+                betas=cfg.betas, eps=cfg.eps
+            ),
+            'adam': lambda: torch.optim.Adam(
+                params, lr=cfg.lr, weight_decay=cfg.weight_decay,
+                betas=cfg.betas, eps=cfg.eps
+            ),
+            'sgd': lambda: torch.optim.SGD(
+                params, lr=cfg.lr, momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay, nesterov=cfg.nesterov
+            ),
         }
 
-        if cfg.optimizer not in optimizers:
-            raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
+        if cfg.type not in optimizers:
+            raise ValueError(f"Unknown optimizer: {cfg.type}")
 
-        return optimizers[cfg.optimizer]()
+        return optimizers[cfg.type]()
 
     def _create_scheduler(self):
-        """Create learning rate scheduler."""
-        cfg = self.train_cfg
+        """Create learning rate scheduler from configuration."""
+        cfg = self.train_cfg.scheduler
         opt = self.optimizer
 
-        if cfg.scheduler == 'cosine_warmup':
+        if cfg.type == 'cosine_warmup':
             return WarmupCosineScheduler(
                 optimizer=opt,
                 warmup_epochs=cfg.warmup_epochs,
-                total_epochs=cfg.num_epochs,
+                total_epochs=self.train_cfg.num_epochs,
                 steps_per_epoch=self.steps_per_epoch,
-                base_lr=cfg.learning_rate,
+                base_lr=self.train_cfg.optimizer.lr,
                 min_lr=cfg.min_lr,
                 warmup_steps=cfg.warmup_steps
             )
 
         schedulers = {
-            'cosine': lambda: CosineAnnealingWarmRestarts(opt, T_0=10, T_mult=2, eta_min=cfg.min_lr),
-            'plateau': lambda: ReduceLROnPlateau(opt, mode='max', factor=0.5, patience=5, verbose=True),
-            'step': lambda: torch.optim.lr_scheduler.StepLR(opt, step_size=30, gamma=0.1),
+            'cosine': lambda: CosineAnnealingWarmRestarts(
+                opt, T_0=10, T_mult=2, eta_min=cfg.min_lr
+            ),
+            'plateau': lambda: ReduceLROnPlateau(
+                opt, mode=cfg.plateau_mode, factor=cfg.plateau_factor,
+                patience=cfg.plateau_patience, verbose=True
+            ),
+            'step': lambda: torch.optim.lr_scheduler.StepLR(
+                opt, step_size=cfg.step_size, gamma=cfg.gamma
+            ),
         }
 
-        return schedulers.get(cfg.scheduler, lambda: None)()
+        return schedulers.get(cfg.type, lambda: None)()
 
     def _clip_gradients(self):
         """Clip gradients if configured."""
@@ -317,7 +337,7 @@ class Trainer:
 
         for batch_idx, (features, targets) in enumerate(self.train_loader):
             # Step step-based scheduler at the beginning of each batch
-            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps > 0:
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.scheduler.warmup_steps > 0:
                 self.scheduler.step(step=self.global_step)
 
             features = features.to(self.device)
@@ -502,14 +522,8 @@ class Trainer:
         }
 
     def _save_checkpoint(self, filename: str, is_best: bool = False, use_ema: bool = True):
-        """Save model checkpoint (only on rank 0).
-
-        Args:
-            filename: Checkpoint filename
-            is_best: Whether this is the best model
-            use_ema: Whether to save EMA version as primary model
-        """
-        if self.rank != 0:
+        """Save model checkpoint (only on rank 0 when checkpoint_dir is set)."""
+        if self.rank != 0 or self.checkpoint_dir is None:
             return
 
         # Apply EMA shadow for saving if enabled
@@ -541,7 +555,7 @@ class Trainer:
         if self.scheduler is not None:
             checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
 
-        checkpoint_dir = Path(self.train_cfg.checkpoint_dir)
+        checkpoint_dir = Path(self.checkpoint_dir)
         path = checkpoint_dir / filename
         torch.save(checkpoint, path)
         self.logger.info(f"Checkpoint saved: {path}")
@@ -597,7 +611,7 @@ class Trainer:
             should_stop = False
 
             # Step epoch-based scheduler at the beginning of each epoch
-            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.warmup_steps == 0:
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.scheduler.warmup_steps == 0:
                 self.scheduler.step(epoch=epoch)
 
             epoch_start = time.time()
@@ -748,7 +762,7 @@ def main():
             # Note: batch_size is per GPU in distributed training
             config.training.batch_size = args.batch_size
         if args.lr:
-            config.training.learning_rate = args.lr
+            config.training.optimizer.lr = args.lr
 
         # Override model architecture
         if args.d_model:
@@ -760,39 +774,30 @@ def main():
 
         config.model.__post_init__()
 
-        # Create unified output directory based on timestamp (only rank 0 creates, others use same path)
+        # Create unified output directory based on timestamp (only rank 0 creates, others use None)
+        checkpoint_dir = log_dir = None
         if rank == 0:
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_dir = Path("runs") / timestamp
+            base_run_dir = Path(config.training.run_dir)
+            run_dir = base_run_dir / timestamp
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "checkpoints").mkdir(exist_ok=True)
             (run_dir / "tensorboard").mkdir(exist_ok=True)
             (run_dir / "logs").mkdir(exist_ok=True)
-            run_dir_str = str(run_dir.absolute())
-        else:
-            run_dir_str = None
 
-        # Broadcast run_dir to all ranks (for DDP)
-        if world_size > 1:
-            run_dir_list = [run_dir_str] if rank == 0 else [None]
-            dist.broadcast_object_list(run_dir_list, src=0)
-            run_dir_str = run_dir_list[0]
+            checkpoint_dir = str(run_dir / "checkpoints")
+            log_dir = str(run_dir / "tensorboard")
 
-        # Update config paths to use unified directory
-        config.training.checkpoint_dir = str(Path(run_dir_str) / "checkpoints")
-        config.training.log_dir = str(Path(run_dir_str) / "tensorboard")
+            # Auto-generate log_file if not specified
+            if args.log_file is None:
+                args.log_file = str(run_dir / "logs" / "train.log")
 
-        # Auto-generate log_file if not specified
-        if args.log_file is None:
-            args.log_file = str(Path(run_dir_str) / "logs" / "train.log")
-
-        # Re-configure logger with file output (only rank 0 writes to file)
-        if rank == 0 and args.log_file:
+            # Re-configure logger with file output
             logger = setup_file_logger(args.log_file, rank=rank, name=None)
-            logger.info(f"Training outputs saved to: {run_dir_str}")
-            logger.info(f"  Checkpoints: {config.training.checkpoint_dir}")
-            logger.info(f"  TensorBoard: {config.training.log_dir}")
+            logger.info(f"Training outputs saved to: {run_dir}")
+            logger.info(f"  Checkpoints: {checkpoint_dir}")
+            logger.info(f"  TensorBoard: {log_dir}")
             logger.info(f"  Logs: {args.log_file}")
 
         # Load data
@@ -871,7 +876,13 @@ def main():
             dist.barrier()
 
         # Create trainer and train (checkpoint loading handled inside Trainer)
-        trainer = Trainer(model, config, train_loader, val_loader, device, rank, world_size, checkpoint_path=args.resume)
+        trainer = Trainer(
+            model, config, train_loader, val_loader, device,
+            rank, world_size,
+            checkpoint_dir=checkpoint_dir,
+            log_dir=log_dir,
+            checkpoint_path=args.resume
+        )
         trainer.train()
 
     finally:

@@ -79,6 +79,54 @@ class LossConfig:
 
 
 @dataclass
+class OptimizerConfig:
+    """Optimizer configuration"""
+    # Optimizer type: 'adamw', 'adam', 'sgd'
+    type: str = 'adamw'
+
+    # Learning rate
+    lr: float = 1e-3
+
+    # Weight decay (L2 regularization)
+    weight_decay: float = 1e-5
+
+    # Adam/AdamW specific
+    betas: tuple = (0.9, 0.98)  # (beta1, beta2)
+    eps: float = 1e-8
+
+    # SGD specific
+    momentum: float = 0.9
+    nesterov: bool = False
+
+
+@dataclass
+class SchedulerConfig:
+    """Learning rate scheduler configuration"""
+    # Scheduler type: 'cosine_warmup', 'cosine', 'plateau', 'step', 'none'
+    type: str = 'cosine_warmup'
+
+    # Warmup settings (for cosine_warmup)
+    warmup_epochs: int = 5  # Number of epochs for warmup
+    warmup_steps: int = 0   # If > 0, use steps instead of epochs for warmup
+
+    # Learning rate bounds
+    min_lr: float = 1e-6
+
+    # Cosine annealing settings (for cosine or cosine_warmup)
+    # Total decay epochs after warmup (0 = auto: total_epochs - warmup_epochs)
+    decay_epochs: int = 0
+
+    # Step scheduler settings (for 'step')
+    step_size: int = 30     # Epochs between LR decay
+    gamma: float = 0.1      # LR decay factor
+
+    # Plateau scheduler settings (for 'plateau')
+    plateau_mode: str = 'max'       # 'max' or 'min'
+    plateau_factor: float = 0.5     # LR reduction factor
+    plateau_patience: int = 5       # Epochs to wait before reducing LR
+
+
+@dataclass
 class MixupConfig:
     """Mixup augmentation configuration"""
     cry_mix_prob: float = 0.3
@@ -378,28 +426,25 @@ class TrainingConfig:
     num_workers: int = 4
     pin_memory: bool = True
     num_epochs: int = 100
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-5
     grad_clip: Optional[float] = 1.0
     early_stopping_patience: Optional[int] = 10
-    checkpoint_dir: str = './checkpoints'
-    log_dir: str = './logs'
     use_augmentation: bool = True
     device: str = 'cuda'
     log_interval: int = 10
     val_interval: int = 1
     save_best_only: bool = True
 
+    # Output directory (auto-created subdirs: checkpoints/, logs/, tensorboard/)
+    run_dir: str = 'runs'
+
     # Random seed for reproducibility
     seed: int = 42
 
-    # Optimizer settings
-    optimizer: str = 'adamw'  # 'adam', 'adamw', 'sgd'
-    scheduler: str = 'cosine'  # 'step', 'cosine', 'plateau', 'cosine_warmup', 'none'
-    warmup_epochs: int = 5
-    warmup_steps: int = 0  # If > 0, use steps instead of epochs for warmup
-    min_lr: float = 1e-6
-    lr_decay_epochs: int = 0  # For cosine_warmup: epochs for cosine decay after warmup (0 = auto)
+    # Optimizer configuration
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+
+    # Scheduler configuration
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
     # Loss configuration
     loss: LossConfig = field(default_factory=LossConfig)

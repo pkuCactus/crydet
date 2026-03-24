@@ -91,28 +91,47 @@ training:
   num_workers: 4
   pin_memory: true
   num_epochs: 100
-  learning_rate: 0.001
-  weight_decay: 0.01
   grad_clip: 5.0
   early_stopping_patience: 15
-  checkpoint_dir: ./checkpoints/medium
-  log_dir: ./logs/medium
   use_augmentation: true
   device: cuda
   log_interval: 10
   val_interval: 1
   save_best_only: true
-  optimizer: adamw
-  scheduler: cosine_warmup       # Options: 'cosine_warmup', 'cosine', 'plateau', 'step', 'none'
-  warmup_epochs: 5              # Epochs for linear warmup (used if warmup_steps=0)
-  warmup_steps: 0               # Steps for linear warmup (0 = use warmup_epochs)
-  lr_decay_epochs: 0            # Epochs for cosine decay after warmup (0 = auto: total - warmup)
-  min_lr: 0.000001
+
+  # Output directory (auto-created subdirs: checkpoints/, logs/, tensorboard/)
+  run_dir: runs
+
+  # Optimizer configuration
+  optimizer:
+    type: adamw                    # Options: 'adamw', 'adam', 'sgd'
+    lr: 0.001                      # Learning rate
+    weight_decay: 0.01             # L2 regularization
+    betas: [0.9, 0.98]             # Adam beta parameters
+    eps: 1.0e-8                    # Adam epsilon for numerical stability
+    momentum: 0.9                  # SGD momentum (only for SGD)
+    nesterov: false                # SGD Nesterov momentum (only for SGD)
+
+  # Learning rate scheduler configuration
+  scheduler:
+    type: cosine_warmup            # Options: 'cosine_warmup', 'cosine', 'plateau', 'step', 'none'
+    warmup_epochs: 5               # Epochs for linear warmup (used if warmup_steps=0)
+    warmup_steps: 0                # Steps for linear warmup (0 = use warmup_epochs)
+    min_lr: 0.000001               # Minimum learning rate
+    decay_epochs: 0                # Epochs for cosine decay after warmup (0 = auto)
+    # Step scheduler settings
+    step_size: 30                  # Epochs between LR decay (for 'step')
+    gamma: 0.1                     # LR decay factor (for 'step')
+    # Plateau scheduler settings
+    plateau_mode: max              # 'max' or 'min' (for 'plateau')
+    plateau_factor: 0.5            # LR reduction factor (for 'plateau')
+    plateau_patience: 5            # Epochs to wait before reducing LR (for 'plateau')
 
   # SpecAugment settings
   use_spec_augment: true
   spec_augment_freq_mask: 8
   spec_augment_time_mask: 20
+
   # Loss function configuration
   loss:
     loss_type: combined         # Options: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce', 'ohem_combined'

@@ -80,26 +80,34 @@ training:
   num_workers: 4
   pin_memory: true
   num_epochs: 150
-  learning_rate: 0.002
-  weight_decay: 0.001
   grad_clip: 1.0
   early_stopping_patience: 20
-  checkpoint_dir: ./checkpoints/tiny
-  log_dir: ./logs/tiny
   use_augmentation: true
   device: cuda
   log_interval: 10
   val_interval: 1
   save_best_only: true
-  optimizer: adamw
-  scheduler: cosine
-  warmup_epochs: 10
-  min_lr: 0.000001
+
+  # Output directory (auto-created subdirs: checkpoints/, logs/, tensorboard/)
+  run_dir: runs
+
+  # Optimizer configuration
+  optimizer:
+    type: adamw
+    lr: 0.002
+    weight_decay: 0.001
+
+  # Scheduler configuration
+  scheduler:
+    type: cosine
+    warmup_epochs: 10
+    min_lr: 0.000001
 
   # SpecAugment settings
   use_spec_augment: true
   spec_augment_freq_mask: 4
   spec_augment_time_mask: 10
+
   # Loss function configuration
   loss:
     loss_type: combined         # Options: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce', 'ohem_combined'
