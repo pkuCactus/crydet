@@ -16,9 +16,8 @@ from torch.utils.data import Dataset
 
 from .audio_reader import AudioReader
 from .augmentation import AudioAugmenter
-from .feature import FeatureExtractor
 from .utils import pad_pcm
-from utils.config import DatasetConfig, AugmentationConfig, FeatureConfig
+from utils.config import DatasetConfig, AugmentationConfig
 
 MIN_DURATION = 1.0  # Minimum duration of audio files to consider (in seconds)
 # Default minimum energy threshold for cry samples (in dB, relative to max)
@@ -45,18 +44,17 @@ def compute_energy_db(waveform: np.ndarray) -> float:
 
 class CryDataset(Dataset):
     """
-    Dataset for baby cry detection with low-energy cry filtering and feature extraction
+    Dataset for baby cry detection with low-energy cry filtering
 
-    Returns pre-extracted features in [T, F] format for Transformer input:
-    - T: time frames (e.g., 157 for 5s audio)
-    - F: feature dimension (64/128/192 depending on delta configuration)
+    Returns raw audio waveforms for feature extraction in training loop:
+    - waveform: [N] numpy array of audio samples
+    - label: 'cry' or 'other'
     """
     def __init__(
         self,
         data_dict: dict,
         config: DatasetConfig,
         aug_config: Optional[AugmentationConfig] = None,
-        feat_config: Optional[FeatureConfig] = None,
         cry_min_energy_db: float = -40.0,
     ):
         self.audio_reader = AudioReader(
@@ -67,10 +65,6 @@ class CryDataset(Dataset):
         self.config = config
         self.data_dict = data_dict
         self.cry_min_energy_db = cry_min_energy_db
-
-        # Initialize feature extractor
-        self.feat_config = feat_config or FeatureConfig()
-        self.feature_extractor = FeatureExtractor(self.feat_config)
 
         # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
@@ -87,25 +81,21 @@ class CryDataset(Dataset):
 
     def __getitem__(self, index: tuple[str, int]):
         label, file_idx = index
-        file_schedule = self.file_schedule_dict[label][file_idx]
-        file_path, start_time, actual_len, need_pad = file_schedule
+        file_path, start_time, actual_len, need_pad = self.file_schedule_dict[label][file_idx]
 
-        # 加载音频片段
+        # Load audio segment
         waveform, _ = self.audio_reader.load_by_time(file_path, start_time, start_time + actual_len)
 
-        # 如果需要补全
+        # Pad if needed
         if need_pad:
             target_samples = int(self.config.slice_len * self.config.sample_rate)
             waveform = pad_pcm(waveform, target_samples, pad_silence_prob=0.5, pad_front_prob=0.5, truncate=False)
 
-        # Apply augmentation if enabled (all logic encapsulated in augmenter)
+        # Apply augmentation if enabled
         if self.augmenter is not None:
             waveform = self.augmenter.augment(waveform, label)
 
-        # Extract features in [T, F] format for Transformer
-        features = self.feature_extractor.extract_with_deltas(waveform, self.config.sample_rate)
-
-        return features, label
+        return waveform, label
 
     def __len__(self) -> int:
         """Return the total number of samples per epoch based on cry rate"""

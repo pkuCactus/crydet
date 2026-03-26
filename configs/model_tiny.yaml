@@ -2,17 +2,22 @@
 # Ultra-lightweight model for MCU deployment (Cortex-M, ESP32)
 
 # Feature extraction settings
+# feature_type uses bit flags: FBANK=1, DB=2, MFCC=4, FFT=8
+# Combine with OR: 1=FBANK, 3=FBANK+DB, 5=FBANK+MFCC, 7=FBANK+DB+MFCC, 15=ALL
 feature:
-  feature_type: fbank
-  n_mels: 32
-  n_fft: 1024
-  hop_length: 500
-  fmin: 250
-  fmax: 8000
-  preemphasis: 0.95
-  use_fbank_norm: true
-  use_delta: false
-  use_freq_delta: false
+  feature_type: 3              # FBANK + DB (recommended)
+  n_mels: 32                   # Number of mel filters
+  n_mfcc: 16                   # Number of MFCC coefficients
+  n_fft: 1024                  # FFT window size
+  hop_length: 500              # Hop length between frames
+  fmin: 250                    # Minimum frequency for mel filterbank
+  fmax: 8000                   # Maximum frequency for mel filterbank
+  preemphasis: 0.95            # Preemphasis coefficient
+  use_fbank_norm: true         # Normalize FBank with exponential smoothing
+  fbank_decay: 0.9             # FBank normalization decay factor
+  use_db_norm: false           # Normalize DB features with moving max
+  use_time_delta: false        # Add time delta features
+  use_freq_delta: false        # Add frequency delta features
 
 # Dataset settings
 dataset:
@@ -33,6 +38,17 @@ augmentation:
     cry_mix_rate_std: 0.15
     other_mix_prob: 0.2
     mix_front_prob: 0.7
+  # Noise augmentation configuration
+  noise:
+    prob: 0.1                  # Probability of applying noise augmentation
+    white_noise_prob: 0.3      # White noise weight
+    pink_noise_prob: 0.4       # Pink noise weight (more natural sounding)
+    ambient_noise_prob: 0.3    # Ambient/environmental noise weight
+    snr_min: 5.0               # Minimum SNR in dB
+    snr_max: 25.0              # Maximum SNR in dB
+    pink_noise_alpha: 1.0      # Pink noise spectral decay (1.0 = classic pink)
+    ambient_noise_dir: null    # Directory with ambient noise files (null to disable)
+    ambient_noise_files: []    # List of specific ambient noise files
   cry_aug_prob: 0.8
   other_aug_prob: 0.5
   other_reverse_prob: 0.5
@@ -40,7 +56,6 @@ augmentation:
   reverb_prob: 0.6
   phaser_prob: 0.4
   echo_prob: 0.4
-  noise_prob: 0.1
   gain_prob: 0.8
   time_stretch_prob: 0.0
 

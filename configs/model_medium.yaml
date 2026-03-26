@@ -2,18 +2,22 @@
 # Lightweight model for edge devices (Raspberry Pi, Edge TPU)
 
 # Feature extraction settings
+# feature_type uses bit flags: FBANK=1, DB=2, MFCC=4, FFT=8
+# Combine with OR: 1=FBANK, 3=FBANK+DB, 5=FBANK+MFCC, 7=FBANK+DB+MFCC, 15=ALL
 feature:
-  feature_type: fbank
-  n_mels: 64
-  n_fft: 1024
-  hop_length: 500
-  fmin: 200
-  fmax: 8500
-  preemphasis: 0.95
-  use_fbank_norm: true
-  use_delta: true
-  use_freq_delta: true
-  use_db_feature: true
+  feature_type: 3              # FBANK + DB (recommended for best performance)
+  n_mels: 64                   # Number of mel filters
+  n_mfcc: 16                   # Number of MFCC coefficients
+  n_fft: 1024                  # FFT window size
+  hop_length: 500              # Hop length between frames
+  fmin: 200                    # Minimum frequency for mel filterbank
+  fmax: 8500                   # Maximum frequency for mel filterbank
+  preemphasis: 0.95            # Preemphasis coefficient
+  use_fbank_norm: true         # Normalize FBank with exponential smoothing
+  fbank_decay: 0.9             # FBank normalization decay factor
+  use_db_norm: false           # Normalize DB features with moving max
+  use_time_delta: true         # Add time delta features
+  use_freq_delta: true         # Add frequency delta features
 
 # Dataset settings
 dataset:
@@ -36,6 +40,7 @@ augmentation:
     mix_front_prob: 0.7
   # Noise augmentation configuration
   noise:
+    prob: 0.15                 # Probability of applying noise augmentation
     white_noise_prob: 0.3      # White noise weight
     pink_noise_prob: 0.5       # Pink noise weight (more natural sounding)
     ambient_noise_prob: 0.2    # Ambient/environmental noise weight
@@ -53,7 +58,6 @@ augmentation:
   echo_prob: 0.5
   time_stretch_prob: 0.3
   gain_prob: 0.9
-  noise_prob: 0.15            # Probability of applying noise augmentation
 
 # Model settings
 # Architecture is controlled by layer parameters (d_model, n_layers, n_heads)

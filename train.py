@@ -45,7 +45,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.config import Config, load_config
+from utils.config import Config, load_config, save_config
 from dataset.dataset import CryDataset
 from dataset.dataloader import collate_fn, worker_init_fn, load_data_dict
 from dataset.sampler import CrySampler, DistributedCrySampler, SequentialCrySampler
@@ -99,7 +99,8 @@ class Trainer:
         world_size: int = 1,
         checkpoint_dir: Optional[str] = None,
         log_dir: Optional[str] = None,
-        checkpoint_path: Optional[str] = None
+        checkpoint_path: Optional[str] = None,
+        feature_extractor: Optional[torch.nn.Module] = None
     ):
         self.config = config
         self.train_loader = train_loader
@@ -110,6 +111,7 @@ class Trainer:
         self.is_distributed = world_size > 1
         self.checkpoint_dir = checkpoint_dir
         self.log_dir = log_dir
+        self.feature_extractor = feature_extractor
 
         model = model.to(device)
         self.raw_model = model
@@ -320,9 +322,29 @@ class Trainer:
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         return metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 
+    def _extract_features(self, waveforms: torch.Tensor) -> torch.Tensor:
+        """Extract features from waveforms if feature extractor is configured."""
+        if self.feature_extractor is None:
+            return waveforms
+        return self.feature_extractor(waveforms)
+
     def _train_epoch(self, log_interval: int = 10) -> Dict[str, float]:
         """Train one epoch with periodic logging instead of tqdm."""
         self.model.train()
+        if self.feature_extractor is not None:
+            # Check if mask should be enabled based on epoch range
+            mask_config = self.config.feature.mask
+            current = self.current_epoch
+            start = mask_config.start_epoch
+            end = mask_config.end_epoch
+
+            # Enable mask when: start_epoch <= current < end_epoch (or end < 0 means no end)
+            mask_enabled = mask_config.enable and current >= start and (end < 0 or current < end)
+
+            if mask_enabled:
+                self.feature_extractor.train()  # Enable DropBlock
+            else:
+                self.feature_extractor.eval()   # Disable DropBlock
 
         if hasattr(self.train_loader.sampler, 'set_epoch'):
             self.train_loader.sampler.set_epoch(self.current_epoch)
@@ -335,11 +357,12 @@ class Trainer:
         if start_time:
             start_time.record()
 
-        for batch_idx, (features, targets) in enumerate(self.train_loader):
+        for batch_idx, (waveforms, targets) in enumerate(self.train_loader):
             # Step step-based scheduler at the beginning of each batch
             if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.scheduler.warmup_steps > 0:
                 self.scheduler.step(step=self.global_step)
 
+            features = self._extract_features(waveforms)
             features = features.to(self.device)
             targets = targets.to(self.device)
 
@@ -437,6 +460,8 @@ class Trainer:
 
         try:
             self.model.eval()
+            if self.feature_extractor is not None:
+                self.feature_extractor.eval()  # Disable DropBlock during validation
 
             total_loss = 0.0
             correct = 0
@@ -447,7 +472,8 @@ class Trainer:
 
             num_batches = len(self.val_loader)
 
-            for batch_idx, (features, targets) in enumerate(self.val_loader):
+            for batch_idx, (waveforms, targets) in enumerate(self.val_loader):
+                features = self._extract_features(waveforms)
                 features = features.to(self.device)
                 targets = targets.to(self.device)
 
@@ -800,6 +826,11 @@ def main():
             logger.info(f"  TensorBoard: {log_dir}")
             logger.info(f"  Logs: {args.log_file}")
 
+            # Save training configuration
+            config_save_path = run_dir / "config.yaml"
+            save_config(config, str(config_save_path))
+            logger.info(f"  Config: {config_save_path}")
+
         # Load data
         if rank == 0:
             logger.info(f"Loading training data from: {args.train_list}")
@@ -808,8 +839,7 @@ def main():
         # Create datasets
         train_dataset = CryDataset(
             train_dict, config.dataset,
-            aug_config=config.augmentation if config.training.use_augmentation else None,
-            feat_config=config.feature
+            aug_config=config.augmentation if config.training.use_augmentation else None
         )
 
         val_dataset = val_loader = None
@@ -817,7 +847,7 @@ def main():
             if rank == 0:
                 logger.info(f"Loading validation data from: {args.val_list}")
             val_dict = load_data_dict(args.val_list)
-            val_dataset = CryDataset(val_dict, config.dataset, feat_config=config.feature)
+            val_dataset = CryDataset(val_dict, config.dataset)
 
         # Create samplers and loaders
         if world_size > 1:
@@ -871,6 +901,10 @@ def main():
         if rank == 0:
             print_model_summary(model)
 
+        # Create feature extractor with sample_rate (batch_extract handles device placement internally)
+        from dataset.feature import FeatureExtractor
+        feature_extractor = FeatureExtractor(config.feature, sr=config.dataset.sample_rate)
+
         # Synchronize before training to ensure all ranks are ready
         if world_size > 1:
             dist.barrier()
@@ -881,7 +915,8 @@ def main():
             rank, world_size,
             checkpoint_dir=checkpoint_dir,
             log_dir=log_dir,
-            checkpoint_path=args.resume
+            checkpoint_path=args.resume,
+            feature_extractor=feature_extractor
         )
         trainer.train()
 

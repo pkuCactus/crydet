@@ -18,31 +18,38 @@ def collate_fn(batch: List[Tuple[np.ndarray, str]]) -> Tuple[torch.Tensor, torch
     """
     Collate function for CryDataset.
 
-    Stacks features to [B, T, F] and converts labels to indices.
+    Pads audio waveforms to same length and converts labels to indices.
 
     Args:
-        batch: List of (features, label) tuples
-               features shape: [T, F]
+        batch: List of (waveform, label) tuples
+               waveform: 1D numpy array of audio samples
                label: 'cry' or 'other'
 
     Returns:
-        Tuple of (features, labels)
-        - features: [B, T, F] tensor
+        Tuple of (waveforms, labels)
+        - waveforms: [B, max_len] tensor of padded audio
         - labels: [B] tensor of indices (cry=1, other=0)
 
     Example:
-        >>> batch = [(features1, 'cry'), (features2, 'other')]
-        >>> features, labels = collate_fn(batch)
-        >>> print(features.shape)  # [2, T, F]
+        >>> batch = [(waveform1, 'cry'), (waveform2, 'other')]
+        >>> waveforms, labels = collate_fn(batch)
+        >>> print(waveforms.shape)  # [2, max_len]
         >>> print(labels)  # tensor([1, 0])
     """
-    features_list, labels = zip(*batch)
+    waveforms, labels = zip(*batch)
 
-    features = torch.from_numpy(np.stack(features_list)).float()
+    # Pad waveforms to same length
+    max_len = max(w.shape[0] for w in waveforms)
+    padded = np.stack([
+        np.pad(w, (0, max_len - w.shape[0]), mode='constant')
+        for w in waveforms
+    ])
+
+    waveforms_tensor = torch.from_numpy(padded).float()
     label_to_idx = {'cry': 1, 'other': 0}
     label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
 
-    return features, label_indices
+    return waveforms_tensor, label_indices
 
 
 def worker_init_fn(worker_id: int, base_seed: int = 42):

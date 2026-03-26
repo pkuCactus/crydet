@@ -2,19 +2,30 @@
 # Default configuration for training
 
 # Feature extraction settings
+# feature_type uses bit flags: FBANK=1, DB=2, MFCC=4, FFT=8
+# Combine with OR: 1=FBANK, 3=FBANK+DB, 5=FBANK+MFCC, 7=FBANK+DB+MFCC, 15=ALL
 feature:
-  feature_type: fbank          # 'mfcc' or 'fbank'
-  n_mfcc: 40                   # Number of MFCC coefficients (used when feature_type='mfcc')
-  n_mels: 64                   # Number of mel filters (used when feature_type='fbank')
+  feature_type: 3              # 1=FBANK only, 3=FBANK+DB (recommended), 5=FBANK+MFCC
+  n_mels: 32                   # Number of mel filters
+  n_mfcc: 16                   # Number of MFCC coefficients (used when MFCC enabled)
   n_fft: 1024                  # FFT window size
-  hop_length: 500             # Hop length between frames
+  hop_length: 500              # Hop length between frames (~31.25ms @ 16kHz)
   fmin: 250                    # Minimum frequency for mel filterbank
   fmax: 8000                   # Maximum frequency for mel filterbank
-  normalize: true              # Normalize features
-  use_delta: true              # Add time delta features
-  use_freq_delta: true         # Add frequency delta features
-  use_db_feature: false        # Add energy (dB) as additional channel
-  use_db_norm: true            # Normalize db features to [0, 1] range
+  preemphasis: 0.95            # Preemphasis coefficient
+  use_fbank_norm: true         # Normalize FBank with exponential smoothing
+  fbank_decay: 0.9             # FBank normalization decay factor
+  use_db_norm: false           # Normalize DB features with moving max
+  use_time_delta: false        # Add time delta features
+  use_freq_delta: false        # Add frequency delta features
+
+  # Mask configuration (DropBlock augmentation for training)
+  mask:
+    enable: false              # Enable DropBlock masking
+    rate: 0.2                  # Target proportion of features to mask
+    prob: 0.5                  # Probability of applying to each instance
+    start_epoch: 0             # Epoch to start masking (0 = from beginning)
+    end_epoch: -1              # Epoch to end masking (-1 = never end)
 
 # Dataset settings
 dataset:
@@ -36,6 +47,18 @@ augmentation:
     other_mix_prob: 0.3        # Probability of applying mixup to non-cry samples
     mix_front_prob: 0.7        # Probability of applying mixup before other augmentations
 
+  # Noise augmentation configuration
+  noise:
+    prob: 0.1                    # Probability of applying noise augmentation
+    white_noise_prob: 0.3        # White noise weight
+    pink_noise_prob: 0.4         # Pink noise weight (more natural sounding)
+    ambient_noise_prob: 0.3      # Ambient/environmental noise weight
+    snr_min: 5.0                 # Minimum SNR in dB
+    snr_max: 25.0                # Maximum SNR in dB
+    pink_noise_alpha: 1.0        # Pink noise spectral decay (1.0 = classic pink)
+    ambient_noise_dir: null      # Directory with ambient noise files (null to disable)
+    ambient_noise_files: []      # List of specific ambient noise files
+
   cry_aug_prob: 0.9            # Probability of applying augmentation to cry samples
   other_aug_prob: 0.6          # Probability of applying augmentation to non-cry samples
   other_reverse_prob: 0.5      # Probability of reversing non-cry samples
@@ -45,7 +68,6 @@ augmentation:
   reverb_prob: 0.8             # Probability of reverb
   phaser_prob: 0.5             # Probability of phaser effect
   echo_prob: 0.5               # Probability of echo (only for non-cry)
-  noise_prob: 0.1              # Probability of adding noise
   gain_prob: 0.9               # Probability of gain adjustment
   time_stretch_prob: 0.0       # Probability of time stretching
 
@@ -55,9 +77,16 @@ model:
   num_classes: 2               # Number of output classes
   d_model: 256                 # Transformer hidden dimension
   n_heads: 4                   # Number of attention heads
-  n_layers: 8                  # Number of transformer layers
-  d_ff: 512                    # Feed-forward dimension
+  n_layers: 6                  # Number of transformer layers
+  d_ff: 1024                   # Feed-forward dimension
   dropout: 0.1                 # Dropout rate
+  attention_dropout: 0.1       # Attention dropout rate
+  max_seq_len: 200             # Maximum sequence length
+  use_relative_pos: true       # Use relative positional encoding
+  attention_type: auto         # Attention type: standard, linear, depthwise, auto
+  ffn_type: auto               # FFN type: standard, inverted_bottleneck, auto
+  pool_type: mean              # Pooling type: mean, max, attention
+  label_smoothing: 0.1         # Label smoothing factor
 
 # Training settings
 training:
@@ -65,7 +94,7 @@ training:
   num_workers: 4               # Number of data loading workers
   pin_memory: true             # Pin memory for faster GPU transfer
   num_epochs: 100              # Number of training epochs
-  grad_clip: null              # Gradient clipping value (null = no clipping)
+  grad_clip: 1.0               # Gradient clipping value (null = no clipping)
   early_stopping_patience: 10  # Early stopping patience
   use_augmentation: true       # Use data augmentation
   device: cuda                 # Device to use (cuda/cpu)
@@ -81,20 +110,30 @@ training:
     type: adamw                    # Options: 'adamw', 'adam', 'sgd'
     lr: 0.001                      # Learning rate
     weight_decay: 0.00001          # L2 regularization
+    betas: [0.9, 0.98]             # Adam beta parameters
+    eps: 1.0e-8                    # Adam epsilon
 
   # Scheduler configuration
   scheduler:
     type: cosine_warmup            # Options: 'cosine_warmup', 'cosine', 'plateau', 'step', 'none'
-    warmup_epochs: 5
-    min_lr: 0.000001
+    warmup_epochs: 5               # Epochs for linear warmup
+    min_lr: 0.000001               # Minimum learning rate
 
   # Loss function configuration
   loss:
-    loss_type: combined         # Options: 'cross_entropy', 'focal', 'label_smoothing', 'combined', 'ohem_focal', 'ohem_ce', 'ohem_combined'
-    focal_alpha: 0.25           # Focal loss alpha parameter
-    focal_gamma: 2.0            # Focal loss gamma parameter
-    label_smoothing: 0.1        # Label smoothing factor
-    focal_weight: 0.5           # Weight for focal loss in combined mode
-    # OHEM parameters (used when loss_type starts with 'ohem_')
-    ohem_hard_ratio: 0.25       # Ratio of hard examples to keep
-    ohem_min_hard_num: 4        # Minimum number of hard examples per batch
+    loss_type: combined            # Options: 'cross_entropy', 'focal', 'combined', 'ohem_*'
+    focal_alpha: 0.25              # Focal loss alpha parameter
+    focal_gamma: 2.0               # Focal loss gamma parameter
+    label_smoothing: 0.1           # Label smoothing factor
+    focal_weight: 0.5              # Weight for focal loss in combined mode
+    ohem_hard_ratio: 0.25          # Ratio of hard examples to keep
+    ohem_min_hard_num: 4           # Minimum number of hard examples per batch
+
+  # SpecAugment settings
+  use_spec_augment: true
+  spec_augment_freq_mask: 8
+  spec_augment_time_mask: 20
+
+  # EMA (Exponential Moving Average)
+  use_ema: true                    # Enable EMA
+  ema_decay: 0.9999                # EMA decay rate

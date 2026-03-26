@@ -3,6 +3,8 @@ Configuration classes for Baby Cry Detection
 Defines configuration dataclasses for feature extraction, model, and training
 """
 
+import logging
+
 from dataclasses import dataclass, field, asdict, fields, MISSING
 from typing import Optional, Dict, Any, Type, TypeVar, ClassVar, get_origin, get_args
 from pathlib import Path
@@ -139,6 +141,9 @@ class MixupConfig:
 @dataclass
 class NoiseConfig:
     """Noise augmentation configuration"""
+    # Probability of applying noise augmentation
+    prob: float = 0.1
+
     # Noise type probabilities (relative weights, will be normalized)
     white_noise_prob: float = 0.3
     pink_noise_prob: float = 0.4
@@ -172,7 +177,6 @@ class AugmentationConfig:
     reverb_prob: float = 0.8
     phaser_prob: float = 0.5
     echo_prob: float = 0.5
-    noise_prob: float = 0.1
     gain_prob: float = 0.9
     time_stretch_prob: float = 0.0
 
@@ -181,7 +185,6 @@ class AugmentationConfig:
         'reverb': 'reverb_prob',
         'phaser': 'phaser_prob',
         'echo': 'echo_prob',
-        'noise': 'noise_prob',
         'gain': 'gain_prob',
         'time_stretch': 'time_stretch_prob',
     }
@@ -195,10 +198,20 @@ class AugmentationConfig:
 
 
 @dataclass
+class MaskConfig:
+    """Feature mask configuration for training augmentation"""
+    enable: bool = False      # Enable mask augmentation
+    rate: float = 0.2         # Proportion of features to mask
+    prob: float = 0.5         # Probability of applying to each instance in batch
+    start_epoch: int = 0      # Start epoch for mask (0 = from beginning)
+    end_epoch: int = -1       # End epoch for mask (-1 = never end)
+
+
+@dataclass
 class FeatureConfig:
     """Feature extraction configuration"""
-    # Feature type: 'fbank', 'mfcc', 'fft', 'all'
-    feature_type: str = 'fbank'
+    # Feature type: 'fbank':1, 'db': 2, 'mfcc':4, 'fft':8, combine: number or, eg 3 is fbank and db
+    feature_type: int = 1
 
     # FFT parameters
     n_fft: int = 1024
@@ -218,39 +231,37 @@ class FeatureConfig:
     fbank_decay: float = 0.9  # Exponential smoothing decay
 
     # Energy feature
-    use_db_feature: bool = False  # Add energy (dB) feature as additional channel
     use_db_norm: bool = False  # Normalize db features to [0, 1] range
 
     # Output configuration
-    use_delta: bool = False  # Time delta features
+    use_time_delta: bool = False  # Time delta features
     use_freq_delta: bool = False  # Frequency delta features
+
+    # Mask configuration for training augmentation
+    mask: MaskConfig = field(default_factory=MaskConfig)
 
     @property
     def feature_dim(self) -> int:
         """Return total feature dimension based on configuration."""
         # Base feature dimension
-        if self.feature_type == 'fbank':
-            base_dim = self.n_mels
-        elif self.feature_type == 'mfcc':
-            base_dim = self.n_mfcc
-        else:  # 'all' - both fbank and mfcc
-            base_dim = self.n_mels + self.n_mfcc
+        base_dim = 0
+        if self.feature_type & 1:
+            base_dim += self.n_mels
+        if self.feature_type & 4:
+            base_dim += self.n_mfcc
+        if self.feature_type & 8:
+            base_dim += self.n_fft // 2 + 1
 
         # Total dimension = base + optional deltas + optional db features
         dim = base_dim
-        if self.use_delta:
+        if self.use_time_delta:
             dim += base_dim  # Time delta doubles the dimension
         if self.use_freq_delta:
             dim += base_dim  # Frequency delta adds another base_dim
-        if self.use_db_feature:
-            dim += 2  # DB feature adds 2 channels (avg + weighted energy)
+        if self.feature_type & 2:
+            dim += 2
 
         return dim
-
-    @property
-    def frames_per_second(self) -> int:
-        """Return frames per second"""
-        return 16000 // self.hop_length
 
 
 @dataclass
