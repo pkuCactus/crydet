@@ -353,11 +353,7 @@ class FeatureExtractor(torch.nn.Module):
             ceil_mode=True
         )
         # Crop to original size [B, T, F]
-        if mask_block.shape[2] > time_steps:
-            mask_block = mask_block[:, :, :time_steps, :]
-        if mask_block.shape[3] > feat_dim:
-            mask_block = mask_block[:, :, :, :feat_dim]
-        mask_block = mask_block.squeeze(1)
+        mask_block = mask_block.squeeze(1)[:, :time_steps, :feat_dim]
 
         # Calculate actual mask rate
         actual_rate = mask_block.mean().item()
