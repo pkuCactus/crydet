@@ -103,7 +103,7 @@ training:
   num_workers: 8
   pin_memory: true
   # DataLoader performance tuning
-  prefetch_factor: 4           # Prefetch batches per worker (higher = more memory, better throughput)
+  prefetch_factor: 16           # Prefetch batches per worker (higher = more memory, better throughput)
   persistent_workers: true     # Keep workers alive between epochs (single GPU only, disabled for DDP)
   num_epochs: 100
   grad_clip: 5.0
