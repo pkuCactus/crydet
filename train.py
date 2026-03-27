@@ -322,6 +322,7 @@ class Trainer:
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
         return metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 
+    @torch.no_grad()
     def _extract_features(self, waveforms: torch.Tensor) -> torch.Tensor:
         """Extract features from waveforms if feature extractor is configured."""
         if self.feature_extractor is None:
