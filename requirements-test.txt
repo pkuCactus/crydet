@@ -1,0 +1,14 @@
+# Test dependencies for crydet
+# Install with: pip install -r requirements-test.txt
+
+# Include base requirements
+-r requirements.txt
+
+# Testing frameworks
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-xdist>=3.3.0
+
+# Code quality (optional but recommended for testing)
+flake8>=6.1.0
+mypy>=1.5.0
