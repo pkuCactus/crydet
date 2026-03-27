@@ -14,10 +14,18 @@ feature:
   fmax: 8500                   # Maximum frequency for mel filterbank
   preemphasis: 0.95            # Preemphasis coefficient
   use_fbank_norm: true         # Normalize FBank with exponential smoothing
-  fbank_decay: 0.9             # FBank normalization decay factor
+  fbank_decay: 0.97            # FBank normalization decay factor
   use_db_norm: false           # Normalize DB features with moving max
   use_time_delta: true         # Add time delta features
-  use_freq_delta: true         # Add frequency delta features
+  use_freq_delta: false        # Add frequency delta features
+
+  # Mask configuration (DropBlock augmentation for training)
+  mask:
+    enable: true               # Enable DropBlock masking
+    rate: 0.2                  # Target proportion of features to mask
+    prob: 0.5                  # Probability of applying to each instance
+    start_epoch: 20            # Epoch to start masking (0 = from beginning)
+    end_epoch: 40              # Epoch to end masking (-1 = never end)
 
 # Dataset settings
 dataset:
@@ -26,14 +34,14 @@ dataset:
   sample_rate: 16000
   slice_len: 5.0
   stride: 3.0
-  cry_rate: 0.4
+  cry_rate: 0.5
   cache_dir: ./audio_cache
   force_mono: true
 
 # Data augmentation settings
 augmentation:
   mixup:
-    cry_mix_prob: 0.3
+    cry_mix_prob: 0.4
     cry_mix_rate_mean: 0.3
     cry_mix_rate_std: 0.15
     other_mix_prob: 0.3
@@ -80,7 +88,7 @@ model:
 
   # Attention and FFN types: 'standard', 'linear', 'depthwise', 'inverted_bottleneck', or 'auto'
   # When set to 'auto', efficient variants are selected for smaller models
-  attention_type: linear
+  attention_type: auto
   ffn_type: auto
 
   # Pooling: 'mean', 'max', 'attention'
@@ -91,8 +99,8 @@ model:
 
 # Training settings
 training:
-  batch_size: 64
-  num_workers: 4
+  batch_size: 256
+  num_workers: 8
   pin_memory: true
   num_epochs: 100
   grad_clip: 5.0
@@ -119,8 +127,8 @@ training:
   # Learning rate scheduler configuration
   scheduler:
     type: cosine_warmup            # Options: 'cosine_warmup', 'cosine', 'plateau', 'step', 'none'
-    warmup_epochs: 5               # Epochs for linear warmup (used if warmup_steps=0)
-    warmup_steps: 0                # Steps for linear warmup (0 = use warmup_epochs)
+    warmup_epochs: 0               # Epochs for linear warmup (used if warmup_steps=0)
+    warmup_steps: 10000            # Steps for linear warmup (0 = use warmup_epochs)
     min_lr: 0.000001               # Minimum learning rate
     decay_epochs: 0                # Epochs for cosine decay after warmup (0 = auto)
     # Step scheduler settings
@@ -132,7 +140,7 @@ training:
     plateau_patience: 5            # Epochs to wait before reducing LR (for 'plateau')
 
   # SpecAugment settings
-  use_spec_augment: true
+  use_spec_augment: false
   spec_augment_freq_mask: 8
   spec_augment_time_mask: 20
 
