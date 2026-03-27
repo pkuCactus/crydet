@@ -444,6 +444,11 @@ class TrainingConfig:
     batch_size: int = 32
     num_workers: int = 4
     pin_memory: bool = True
+    # DataLoader prefetch factor (num_batches = prefetch_factor * num_workers)
+    # Higher values improve throughput but use more memory
+    prefetch_factor: int = 4
+    # Keep DataLoader workers alive between epochs
+    persistent_workers: bool = True
     num_epochs: int = 100
     grad_clip: Optional[float] = 1.0
     early_stopping_patience: Optional[int] = 10

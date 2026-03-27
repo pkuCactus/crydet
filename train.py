@@ -364,8 +364,8 @@ class Trainer:
                 self.scheduler.step(step=self.global_step)
 
             features = self._extract_features(waveforms)
-            features = features.to(self.device)
-            targets = targets.to(self.device)
+            features = features.to(self.device, non_blocking=True)
+            targets = targets.to(self.device, non_blocking=True)
 
             outputs, loss = self._forward_backward_step(features, targets)
 
@@ -475,8 +475,8 @@ class Trainer:
 
             for batch_idx, (waveforms, targets) in enumerate(self.val_loader):
                 features = self._extract_features(waveforms)
-                features = features.to(self.device)
-                targets = targets.to(self.device)
+                features = features.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
 
                 outputs = self.model(features)
                 loss = self.criterion(outputs, targets)
@@ -865,15 +865,19 @@ def main():
         # Create worker init function with seed for reproducibility
         worker_init = partial(worker_init_fn, base_seed=args.seed) if config.training.num_workers > 0 else None
 
+        # Determine persistent_workers (disable for DDP to avoid deadlock)
+        persistent_workers = config.training.persistent_workers and world_size == 1
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.training.batch_size,
             sampler=train_sampler,
             num_workers=config.training.num_workers,
+            prefetch_factor=config.training.prefetch_factor if config.training.num_workers > 0 else None,
             pin_memory=config.training.pin_memory and device.type == 'cuda',
             collate_fn=collate_fn,
             worker_init_fn=worker_init,
-            persistent_workers=False,  # Disable to avoid deadlock in DDP
+            persistent_workers=persistent_workers if config.training.num_workers > 0 else False,
             drop_last=True  # Important for DDP: avoid uneven batch sizes
         )
 
@@ -883,10 +887,11 @@ def main():
                 batch_size=config.training.batch_size,
                 sampler=SequentialCrySampler(val_dataset, partition_rank=True),
                 num_workers=config.training.num_workers,
+                prefetch_factor=config.training.prefetch_factor if config.training.num_workers > 0 else None,
                 pin_memory=config.training.pin_memory and device.type == 'cuda',
                 collate_fn=collate_fn,
                 worker_init_fn=worker_init,
-                persistent_workers=False
+                persistent_workers=persistent_workers if config.training.num_workers > 0 else False
             )
 
         # Create model
