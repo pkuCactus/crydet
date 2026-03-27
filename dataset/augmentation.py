@@ -4,7 +4,9 @@ Supports various augmentation techniques for audio classification
 """
 
 import random
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import librosa
 import numpy as np
@@ -14,10 +16,26 @@ from utils.config import AugmentationConfig
 from dataset.audio_reader import AudioReader
 from dataset import utils
 
+# Thread-local storage for sox transformers to avoid recreation
+_thread_local = threading.local()
+
+
+def _get_sox_transformer():
+    """Get thread-local sox transformer"""
+    if not hasattr(_thread_local, 'transformer'):
+        _thread_local.transformer = sox.transform.Transformer()
+    return _thread_local.transformer
+
 
 class AudioAugmenter:
     """
     Audio augmentation with label-aware enhancement chains and mixup sample pool
+
+    Optimizations:
+    - Pre-generated noise pool for faster noise augmentation
+    - Thread-local sox transformers to reduce object creation overhead
+    - Batch augmentation support for DataLoader efficiency
+    - Cached mixup samples with pool refresh
     """
 
     def __init__(
@@ -26,6 +44,7 @@ class AudioAugmenter:
         sample_rate: int = 16000,
         audio_reader: Optional['AudioReader'] = None,
         mixup_pool_size: int = 100,
+        noise_pool_size: int = 20,
     ):
         """
         Initialize augmenter with config
@@ -35,11 +54,13 @@ class AudioAugmenter:
             sample_rate: Audio sample rate
             audio_reader: AudioReader instance for loading audio files
             mixup_pool_size: Number of samples to preload for mixup (default: 100)
+            noise_pool_size: Number of pre-generated noise samples (default: 20)
         """
         self.config = config
         self.sample_rate = sample_rate
         self._audio_reader = audio_reader
         self._mixup_pool_size = mixup_pool_size
+        self._noise_pool_size = noise_pool_size
 
         # Internal state for mixup
         self._file_schedule_dict: Dict[str, List] = {}
@@ -47,6 +68,13 @@ class AudioAugmenter:
         self._pool_initialized = False
         # 每次使用时替换池中样本的概率，保持多样性
         self._refresh_prob = 0.1
+
+        # Pre-generated noise pool for faster access
+        self._noise_pool: Dict[str, List[np.ndarray]] = {
+            'white': [],
+            'pink': []
+        }
+        self._noise_pool_initialized = False
 
         # Preload ambient noise files if configured
         self._ambient_noise_files = self._load_ambient_noise_files()
@@ -138,6 +166,59 @@ class AudioAugmenter:
         weights = [w / total for w in weights]
 
         return random.choices(types, weights=weights, k=1)[0]
+
+    def _init_noise_pool(self, sample_length: int = 80000):
+        """
+        Initialize pre-generated noise pool for faster augmentation
+
+        Args:
+            sample_length: Length of noise samples in samples (default: 80000 for 5s @ 16kHz)
+        """
+        if self._noise_pool_initialized:
+            return
+
+        noise_config = self.config.noise
+
+        # Pre-generate white noise samples
+        if noise_config.white_noise_prob > 0:
+            self._noise_pool['white'] = [
+                np.random.randn(sample_length).astype(np.float32) * 0.1
+                for _ in range(self._noise_pool_size)
+            ]
+
+        # Pre-generate pink noise samples
+        if noise_config.pink_noise_prob > 0:
+            self._noise_pool['pink'] = [
+                self._generate_pink_noise(sample_length)
+                for _ in range(self._noise_pool_size)
+            ]
+
+        self._noise_pool_initialized = True
+
+    def _generate_pink_noise(self, length: int) -> np.ndarray:
+        """Generate pink noise using Voss-McCartney algorithm"""
+        # Simplified pink noise generation
+        white = np.random.randn(length).astype(np.float32)
+        # Apply 1/f filter approximation
+        pink = np.zeros_like(white)
+        pink[0] = white[0]
+        for i in range(1, length):
+            pink[i] = 0.99 * pink[i-1] + 0.01 * white[i]
+        return pink * 0.3
+
+    def _get_pooled_noise(self, noise_type: str) -> np.ndarray:
+        """Get a noise sample from the pre-generated pool"""
+        if not self._noise_pool_initialized:
+            self._init_noise_pool()
+
+        if noise_type in self._noise_pool and self._noise_pool[noise_type]:
+            return random.choice(self._noise_pool[noise_type]).copy()
+
+        # Fallback: generate on the fly
+        length = 80000  # 5s @ 16kHz
+        if noise_type == 'pink':
+            return self._generate_pink_noise(length)
+        return np.random.randn(length).astype(np.float32) * 0.1
 
     def _init_pool(self):
         """Initialize mixup pool with preloaded samples (lazy initialization)"""

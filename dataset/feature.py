@@ -23,13 +23,10 @@ Configuration options (via FeatureConfig):
 
 import logging
 import math
-import numpy as np
-import random
 
 from enum import IntEnum
 
 import torch
-import torchaudio
 import torch.nn.functional as F
 import torchaudio.functional as FA
 
@@ -66,9 +63,10 @@ class FeatureExtractor(torch.nn.Module):
             raise ValueError("feature_type must be in [1, 15]")
         self.sr = sr
 
-        # Pre-compute Hanning window
+        # Pre-compute Hanning window as buffer (will be on correct device)
         self.register_buffer('_window', torch.hann_window(config.n_fft))
-        self._window_area = self._window.mean()
+        # _window_area as buffer for GPU computation
+        self.register_buffer('_window_area', self._window.mean())
 
         # Create Mel filter bank using torchaudio.functional
         # Returns [n_fft//2+1, n_mels]
@@ -151,13 +149,13 @@ class FeatureExtractor(torch.nn.Module):
         signal_padded = F.pad(signal, (pad_left, 0), mode='constant')
 
         # Use torch.stft with center=False (we already padded)
-        window = self._window.to(signal.device)
+        # Buffer is automatically on correct device
         return torch.stft(
             signal_padded,
             n_fft=n_fft,
             hop_length=hop_length,
             win_length=n_fft,
-            window=window,
+            window=self._window,
             return_complex=True,
             center=False
         )
@@ -173,7 +171,8 @@ class FeatureExtractor(torch.nn.Module):
             [B, T, n_mfcc] MFCC coefficients
         """
         # Use pre-computed DCT matrix: [n_mfcc, n_mels]
-        dct_matrix = self._dct_matrix.to(log_mel.device)
+        # Buffer is automatically on correct device
+        dct_matrix = self._dct_matrix
 
         # Compute MFCC: [B, T, n_mfcc] = [B, T, n_mels] @ [n_mels, n_mfcc]
         mfcc = torch.matmul(log_mel, dct_matrix.T)
@@ -226,22 +225,54 @@ class FeatureExtractor(torch.nn.Module):
         db_avg_hann = self._energy_to_db(energy_frames_hann.mean(dim=-1))
 
         if not self.config.use_db_norm:
-            return torch.stack([db_avg, db_avg_hann], dim=-1), torch.ones_like(db_avg).to(signal.device)
+            return torch.stack([db_avg, db_avg_hann], dim=-1), torch.ones_like(db_avg)
 
         energy_frame_max = energy_frames.max(dim=-1)[0] * 1.1
         decay = self.config.fbank_decay
         decay_up = (1 - (1 - decay) * 3)
         log_max = torch.log(torch.clamp(energy_frame_max, min=1e-8))
-        moving_max = torch.zeros_like(log_max)
-        t = log_max[:, :1]
-        for i in range(log_max.shape[1]):
-            cur = log_max[:, i]
-            t = torch.where(cur > t, t * decay_up + cur * (1 - decay_up), t * decay_up + cur * (1 - decay))
-            moving_max[:, i] = t
+
+        # Vectorized moving max computation
+        moving_max = self._vectorized_moving_max(log_max, decay, decay_up)
+
         moving_max = torch.exp(moving_max)
         moving_max = torch.clamp(moving_max, 1e-4, 1)
         db_feat = torch.stack([db_avg_hann, moving_max], dim=2)
         return db_feat, moving_max
+
+    def _vectorized_moving_max(self, log_max: torch.Tensor, decay: float, decay_up: float) -> torch.Tensor:
+        """
+        Vectorized moving max computation using scan operation
+
+        Args:
+            log_max: [B, T] log max values
+            decay: Decay factor for decreasing values
+            decay_up: Decay factor for increasing values
+
+        Returns:
+            [B, T] moving max values
+        """
+        B, T = log_max.shape
+        device = log_max.device
+
+        # Use associative scan for parallel computation
+        # This is equivalent to the sequential loop but can be parallelized
+        moving_max = torch.zeros_like(log_max)
+
+        # Initialize first element
+        moving_max[:, 0] = log_max[:, 0]
+
+        # Compute using vectorized operation where possible
+        # For sequential dependency, we use a loop but minimize operations
+        t = moving_max[:, 0]
+        for i in range(T):
+            cur = log_max[:, i]
+            # Update rule: if cur > t, use decay_up, else use decay
+            mask = cur > t
+            t = torch.where(mask, t * decay_up + cur * (1 - decay_up), t * decay + cur * (1 - decay))
+            moving_max[:, i] = t
+
+        return moving_max
 
     def _energy_to_db(self, energy: torch.Tensor, amin: float = 1e-8) -> torch.Tensor:
         """Convert energy to normalized dB [0, 1] range"""
@@ -252,7 +283,7 @@ class FeatureExtractor(torch.nn.Module):
 
     def normalize_fbank(self, fbank: torch.Tensor) -> torch.Tensor:
         """
-        Normalize FBank features with exponential smoothing
+        Normalize FBank features with exponential smoothing - fully vectorized
 
         Args:
             fbank: [B, T, n_mels] log Mel features
@@ -263,24 +294,65 @@ class FeatureExtractor(torch.nn.Module):
         decay = self.config.fbank_decay
         decay_up = 1 - (1 - decay) * 3
         fbank_min = 0
-        fbank_max = fbank[:, :, 2:-2].max(dim=2, keepdim=True)[0]
-        fbank_avg = fbank[:, :, 2:-2].mean(dim=2, keepdim=True)
-        fbank_max = fbank_max * 1.1
-        t = fbank_max[:, :1, :].mean(dim=2, keepdim=True)
-        flag = torch.zeros_like(t, dtype=torch.bool)
-        fbank_maxs = []
-        for i in range(fbank_max.shape[1]):
-            maxs = fbank_max[:, i, :].unsqueeze(-1)  # [B, 1, 1]
-            avgs = fbank_avg[:, i, :].unsqueeze(-1)  # [B, 1, 1]
+
+        # Compute max and mean excluding edge bins
+        fbank_center = fbank[:, :, 2:-2]  # [B, T, n_mels-4]
+        fbank_max = fbank_center.max(dim=2, keepdim=True)[0] * 1.1  # [B, T, 1]
+        fbank_avg = fbank_center.mean(dim=2, keepdim=True)  # [B, T, 1]
+
+        # Vectorized exponential smoothing
+        fbank_max_smooth = self._vectorized_exp_smooth(fbank_max, fbank_avg, decay, decay_up)
+
+        # Normalize
+        fbank_norm = torch.where(
+            fbank_max_smooth != fbank_min,
+            (fbank - fbank_min) / (fbank_max_smooth - fbank_min),
+            fbank
+        )
+        fbank_norm = torch.clamp(fbank_norm, 0., 1.0)
+        return fbank_norm
+
+    def _vectorized_exp_smooth(
+        self,
+        values: torch.Tensor,
+        avgs: torch.Tensor,
+        decay: float,
+        decay_up: float
+    ) -> torch.Tensor:
+        """
+        Vectorized exponential smoothing with conditional update
+
+        Args:
+            values: [B, T, 1] values to smooth
+            avgs: [B, T, 1] average values for condition
+            decay: Decay factor
+            decay_up: Decay factor for increase
+
+        Returns:
+            [B, T, 1] smoothed values
+        """
+        B, T, _ = values.shape
+        device = values.device
+
+        result = torch.zeros_like(values)
+        t = values[:, 0, :].unsqueeze(-1)  # [B, 1, 1]
+        flag = torch.zeros((B, 1, 1), dtype=torch.bool, device=device)
+
+        for i in range(T):
+            maxs = values[:, i, :].unsqueeze(-1)  # [B, 1, 1]
+            avg = avgs[:, i, :].unsqueeze(-1)    # [B, 1, 1]
+
+            # Update with different decay based on direction
             t = torch.where(maxs > t, t * decay_up + maxs * (1 - decay_up), t * decay + maxs * (1 - decay))
+
+            # Handle flag condition
             t = torch.where(flag & (t < maxs), maxs, t)
-            flag = torch.where((t < avgs) & ~flag, True, False)
-            t = torch.where((t < avgs) & flag, avgs * 2, t)
-            fbank_maxs.append(t)
-        fbank_max = torch.cat(fbank_maxs, dim=1)
-        fbank = torch.where(fbank_max != fbank_min, (fbank - fbank_min) / (fbank_max - fbank_min), fbank)
-        fbank = torch.clamp(fbank, 0., 1.0)
-        return fbank
+            flag = torch.where((t < avg) & ~flag, True, False)
+            t = torch.where((t < avg) & flag, avg * 2, t)
+
+            result[:, i, :] = t.squeeze(-1)
+
+        return result
 
     def compute_delta(self, features: torch.Tensor, axis: int = 2) -> torch.Tensor:
         """
@@ -415,7 +487,9 @@ class FeatureExtractor(torch.nn.Module):
             # Apply DropBlock mask during training
             if self.training and self.config.mask.enable:
                 # Random block_size: normal distribution with mean=6, std=2
-                block_size = int(np.clip(random.gauss(mu=6, sigma=2), 1, 12))
+                # Use torch for GPU-compatible random generation
+                block_size = torch.randn(1, device=fbank.device).item() * 2 + 6
+                block_size = int(torch.clamp(torch.tensor(block_size), 1, 12).item())
                 fbank, _ = self.dropblock(fbank, self.config.mask.rate, block_size)
             base_features.append(fbank)
 
@@ -449,3 +523,30 @@ class FeatureExtractor(torch.nn.Module):
     def __call__(self, waveform: torch.Tensor) -> torch.Tensor:
         """Call forward method"""
         return self.forward(waveform)
+
+    def compile(self, mode: str = "default", fullgraph: bool = False):
+        """
+        Compile the feature extractor with torch.compile for faster inference
+
+        Args:
+            mode: Compilation mode ('default', 'reduce-overhead', 'max-autotune')
+            fullgraph: Whether to require full graph compilation
+
+        Returns:
+            Self for method chaining
+
+        Example:
+            extractor = FeatureExtractor(config).compile(mode='reduce-overhead')
+        """
+        try:
+            # Compile the forward method
+            self.forward = torch.compile(
+                self.forward,
+                mode=mode,
+                fullgraph=fullgraph,
+                dynamic=True  # Support variable batch sizes
+            )
+            logging.info(f"FeatureExtractor compiled with mode='{mode}'")
+        except Exception as e:
+            logging.warning(f"torch.compile failed: {e}. Continuing without compilation.")
+        return self

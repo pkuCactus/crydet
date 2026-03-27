@@ -57,11 +57,15 @@ class CryDataset(Dataset):
         config: DatasetConfig,
         aug_config: Optional[AugmentationConfig] = None,
         cry_min_energy_db: float = -40.0,
+        memory_cache_mb: float = 500,
+        memory_cache_size: int = 100,
     ):
         self.audio_reader = AudioReader(
             target_sr=config.sample_rate,
             cache_dir=config.cache_dir,
-            force_mono=config.force_mono
+            force_mono=config.force_mono,
+            memory_cache_mb=memory_cache_mb,
+            memory_cache_size=memory_cache_size,
         )
         self.config = config
         self.data_dict = data_dict
@@ -84,8 +88,11 @@ class CryDataset(Dataset):
         label, file_idx = index
         file_path, start_time, actual_len, need_pad = self.file_schedule_dict[label][file_idx]
 
-        # Load audio segment
-        waveform, _ = self.audio_reader.load_by_time(file_path, start_time, start_time + actual_len)
+        # Load audio segment with memory cache enabled
+        waveform, _ = self.audio_reader.load_by_time(
+            file_path, start_time, start_time + actual_len,
+            use_memory_cache=True
+        )
 
         # Pad if needed
         if need_pad:
