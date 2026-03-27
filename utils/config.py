@@ -50,6 +50,14 @@ def from_dict(cls: Type[T], data: Dict[str, Any]) -> T:
             nested_data = data.get(f.name, {})
             result[f.name] = from_dict(field_type, nested_data)
         elif value is not MISSING:
+            # Type conversion for basic types
+            if isinstance(value, str):
+                if field_type is float:
+                    value = float(value)
+                elif field_type is int:
+                    value = int(value)
+                elif field_type is bool:
+                    value = value.lower() in ('true', 'yes', '1', 'on')
             result[f.name] = value
         elif f.default is not MISSING:
             result[f.name] = f.default

@@ -27,28 +27,37 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from dataset.dataset import CryDataset
+from dataset.feature import FeatureExtractor
+from dataset.sampler import SequentialCrySampler
 from model import create_model
+from utils.logger import setup_logger, setup_file_logger
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger(__name__)
 
 
-def collate_fn(batch):
-    """
-    Custom collate function for DataLoader.
+class CollateFn:
+    """Collate function that extracts features from raw waveforms."""
 
-    Input: List of (features, label) tuples where features is [T, F] numpy array
-    Output: (features_tensor, label_indices) where features_tensor is [B, T, F]
-    """
-    features_list, labels = zip(*batch)
+    def __init__(self, feature_config):
+        self.feature_extractor = FeatureExtractor(feature_config)
 
-    # Stack features directly (they should all have same shape [T, F])
-    features = torch.from_numpy(np.stack(features_list)).float()  # [B, T, F]
+    def __call__(self, batch):
+        """
+        Custom collate function for DataLoader.
 
-    label_to_idx = {'cry': 1, 'other': 0}
-    label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
+        Input: List of (waveform, label) tuples where waveform is 1D numpy array
+        Output: (features_tensor, label_indices) where features_tensor is [B, T, F]
+        """
+        waveforms, labels = zip(*batch)
 
-    return features, label_indices
+        # Stack waveforms and extract features
+        waveforms_tensor = torch.from_numpy(np.stack(waveforms)).float()  # [B, N]
+        features = self.feature_extractor(waveforms_tensor)  # [B, T, F]
+
+        label_to_idx = {'cry': 1, 'other': 0}
+        label_indices = torch.tensor([label_to_idx.get(l, 0) for l in labels], dtype=torch.long)
+
+        return features, label_indices
 
 
 class Evaluator:
@@ -166,18 +175,24 @@ def main():
     parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     parser.add_argument('--benchmark', action='store_true', help='Run speed benchmark')
     parser.add_argument('--save_report', type=str, default=None, help='Save report to file')
+    parser.add_argument('--log_file', type=str, default=None, help='Path to log file')
     args = parser.parse_args()
 
+    # Setup logging
+    logger = setup_logger(rank=0, name=None)
+    if args.log_file:
+        logger = setup_file_logger(args.log_file, rank=0, name=None)
+
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    LOGGER.info(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     # Load checkpoint
-    LOGGER.info(f"Loading checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    logger.info(f"Loading checkpoint: {args.checkpoint}")
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = checkpoint['config']
 
     # Load test data
-    LOGGER.info(f"Loading test data: {args.test_list}")
+    logger.info(f"Loading test data: {args.test_list}")
     with open(args.test_list, 'r') as f:
         test_dict = json.load(f)
 
@@ -185,21 +200,21 @@ def main():
     test_dataset = CryDataset(
         test_dict,
         config.dataset,
-        aug_config=None,
-        feat_config=config.feature
+        aug_config=None
     )
+    test_dataset.build_schedule(shuffle=False)
     # Evaluation should use all samples, not balanced sampling
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
-        shuffle=False,
+        sampler=SequentialCrySampler(test_dataset),
         num_workers=4,
         pin_memory=True,
-        collate_fn=collate_fn
+        collate_fn=CollateFn(config.feature)
     )
 
     # Calculate input feature dimension (with deltas)
-    in_channels = config.feature.n_mels * config.feature.num_channels
+    in_channels = config.feature.feature_dim
 
     # Create model
     model = create_model(
@@ -217,7 +232,7 @@ def main():
 
     # Benchmark
     if args.benchmark:
-        LOGGER.info("Running speed benchmark...")
+        logger.info("Running speed benchmark...")
         bench_results = evaluator.benchmark()
         print("\n" + "=" * 60)
         print("Speed Benchmark")
@@ -238,7 +253,7 @@ def main():
         }
         with open(args.save_report, 'w') as f:
             json_mod.dump(report, f, indent=2)
-        LOGGER.info(f"Report saved to: {args.save_report}")
+        logger.info(f"Report saved to: {args.save_report}")
 
 
 if __name__ == '__main__':

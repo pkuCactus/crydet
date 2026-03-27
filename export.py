@@ -32,9 +32,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from model import create_model, get_model_info, print_model_summary
 from model.transformer import CryTransformer
+from utils.logger import setup_logger, setup_file_logger
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-LOGGER = logging.getLogger(__name__)
+# Initialize logger using utils.logger setup (will be configured in main)
+LOGGER = setup_logger(rank=0, name=__name__)
 
 
 class FeatureExtractorWrapper(nn.Module):
@@ -66,7 +67,7 @@ class QuantizedModel(nn.Module):
 
 def export_pytorch(checkpoint_path: str, output_path: str):
     """Export to native PyTorch format"""
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     torch.save(checkpoint, output_path)
     LOGGER.info(f"PyTorch model saved: {output_path}")
 
@@ -295,7 +296,7 @@ def export_size_report(checkpoint_path: str):
     """Print model size report"""
     import os
 
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     config = checkpoint['config']
 
     model = create_model(
@@ -343,11 +344,18 @@ def main():
                        help='Sequence length for export')
     parser.add_argument('--size_report', action='store_true',
                        help='Print model size report')
+    parser.add_argument('--log_file', type=str, default=None,
+                       help='Path to log file')
     args = parser.parse_args()
+
+    # Reconfigure logging with file output if specified
+    if args.log_file:
+        global LOGGER
+        LOGGER = setup_file_logger(args.log_file, rank=0, name=__name__)
 
     # Load model
     LOGGER.info(f"Loading checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     config = checkpoint['config']
 
     model = create_model(

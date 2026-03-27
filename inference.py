@@ -13,7 +13,6 @@ Usage:
 
 import argparse
 import json
-import logging
 import sys
 import time
 from pathlib import Path
@@ -28,9 +27,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dataset.audio_reader import AudioReader
 from dataset.feature import FeatureExtractor
 from model import create_model
+from utils.logger import setup_logger, setup_file_logger
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-LOGGER = logging.getLogger(__name__)
+# Initialize logger using utils.logger setup
+LOGGER = setup_logger(rank=0, name=__name__)
 
 
 class CryDetector:
@@ -94,9 +94,13 @@ class CryDetector:
 
     def _extract_features(self, waveform: np.ndarray) -> torch.Tensor:
         """Extract features from waveform"""
-        features = self.feature_extractor.extract_single(waveform, self.sample_rate)
-        features = torch.from_numpy(features).float()
-        features = features.unsqueeze(0)  # (1, T, F) - model expects [B, T, F]
+        # Convert numpy array to torch tensor
+        waveform_tensor = torch.from_numpy(waveform).float()
+        # FeatureExtractor expects [B, N] or [N] format
+        features = self.feature_extractor(waveform_tensor)
+        # If single sample, add batch dimension
+        if features.ndim == 2:
+            features = features.unsqueeze(0)  # (1, T, F)
         return features.to(self.device)
 
     @torch.no_grad()
@@ -148,7 +152,11 @@ class CryDetector:
 
         if not sliding_window or duration <= self.slice_len:
             # Single prediction for short audio
-            return self.predict(waveform)
+            result = self.predict(waveform)
+            # Add time info for consistency
+            result['start_time'] = 0.0
+            result['end_time'] = duration
+            return result
 
         # Sliding window for long audio
         slice_samples = int(self.slice_len * sr)
@@ -293,7 +301,13 @@ def main():
     parser.add_argument('--detect_regions', action='store_true', help='Detect cry regions')
     parser.add_argument('--benchmark', action='store_true', help='Run benchmark')
     parser.add_argument('--output', type=str, default=None, help='Output JSON file')
+    parser.add_argument('--log_file', type=str, default=None, help='Path to log file')
     args = parser.parse_args()
+
+    # Reconfigure logging with file output if specified
+    if args.log_file:
+        global LOGGER
+        LOGGER = setup_file_logger(args.log_file, rank=0, name=__name__)
 
     # Initialize detector
     detector = CryDetector(
@@ -332,6 +346,20 @@ def main():
 
             results['prediction'] = result
 
+    def _get_audio_files(path: str) -> List[str]:
+        """Get list of audio files from path (file or directory)."""
+        path_obj = Path(path)
+        if path_obj.is_file():
+            return [str(path_obj)]
+        elif path_obj.is_dir():
+            # Recursively find all audio files
+            audio_exts = {'.wav', '.mp3', '.flac', '.ogg', '.m4a'}
+            files = []
+            for ext in audio_exts:
+                files.extend(path_obj.glob(f'**/*{ext}'))
+            return sorted([str(f) for f in files])
+        return []
+
     # Batch inference
     if args.audio_list:
         LOGGER.info(f"Processing audio list: {args.audio_list}")
@@ -348,15 +376,20 @@ def main():
             if label != 'cry':
                 paths = paths[1:] if len(paths) > 0 and isinstance(paths[0], int) else paths
 
-            LOGGER.info(f"Processing {len(paths)} files for label: {label}")
+            # Expand directories to files
+            all_files = []
+            for path in paths:
+                all_files.extend(_get_audio_files(path))
 
-            for path in paths[:5]:  # Process first 5 for demo
-                result = detector.predict_file(path, sliding_window=False)
+            LOGGER.info(f"Processing {len(all_files)} files for label: {label}")
+
+            for file_path in all_files[:5]:  # Process first 5 for demo
+                result = detector.predict_file(file_path, sliding_window=False)
                 predicted_label = 'cry' if result['is_cry'] else 'other'
                 correct = (predicted_label == label)
 
                 all_results.append({
-                    'file': path,
+                    'file': file_path,
                     'true_label': label,
                     'predicted_label': predicted_label,
                     'cry_prob': result['cry_prob'],
