@@ -198,7 +198,7 @@ class AudioAugmenter:
                 y_aug = self._apply_effect_group(y_aug, selected[mid:])
 
             y_aug = utils.pad_pcm(y_aug, y.shape[0], 1, 0)
-            if random.random() < self.config.noise_prob:
+            if random.random() < self.config.noise.prob:
                 self._apply_noise(y_aug)
             y_aug = utils.gain(y_aug, utils.get_db(y), abs=True)
 
