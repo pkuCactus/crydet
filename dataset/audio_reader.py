@@ -286,7 +286,8 @@ class AudioReader:
         self,
         file_path: Union[str, Path],
         start_time: float = 0.0,
-        end_time: Optional[float] = None
+        end_time: Optional[float] = None,
+        use_memory_cache: bool = True
     ) -> Tuple[np.ndarray, int]:
         """
         Load audio segment by time (in seconds)
@@ -295,13 +296,14 @@ class AudioReader:
             file_path: Path to audio file
             start_time: Start time in seconds (default: 0.0)
             end_time: End time in seconds (default: None = end of file)
+            use_memory_cache: Whether to use memory cache (default: True)
 
         Returns:
             Tuple of (waveform, sample_rate)
         """
         start_sample = int(start_time * self.target_sr)
         stop_sample = int(end_time * self.target_sr) if end_time is not None else None
-        return self.load(file_path, start=start_sample, stop=stop_sample)
+        return self.load(file_path, start=start_sample, stop=stop_sample, use_memory_cache=use_memory_cache)
 
     def load_batch(
         self,
