@@ -907,9 +907,9 @@ def main():
         if rank == 0:
             print_model_summary(model)
 
-        # Create feature extractor with sample_rate (batch_extract handles device placement internally)
+        # Create feature extractor with sample_rate and move to device
         from dataset.feature import FeatureExtractor
-        feature_extractor = FeatureExtractor(config.feature, sr=config.dataset.sample_rate)
+        feature_extractor = FeatureExtractor(config.feature, sr=config.dataset.sample_rate).to(device)
 
         # Synchronize before training to ensure all ranks are ready
         if world_size > 1:
