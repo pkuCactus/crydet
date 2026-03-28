@@ -2,6 +2,7 @@
 Model variants and factory functions for CryTransformer
 """
 
+import logging
 from typing import Dict
 
 from utils.config import ModelConfig
@@ -165,25 +166,34 @@ def get_model_info(model: CryTransformer) -> Dict:
     }
 
 
-def print_model_summary(model: CryTransformer):
-    """Print a summary of the model"""
+def get_model_summary(model: CryTransformer) -> str:
+    """Get a summary string of the model"""
     info = get_model_info(model)
 
-    print("=" * 60)
-    print(f"CryTransformer Model Summary")
-    print("=" * 60)
-    print(f"Variant:           {info['variant']}")
-    print(f"Size Category:     {info['size_category']}")
-    print(f"Model Dimension:   {info['d_model']}")
-    print(f"Attention Heads:   {info['n_heads']}")
-    print(f"Encoder Layers:    {info['n_layers']}")
-    print(f"FFN Dimension:     {info['d_ff']}")
-    print(f"Attention Type:    {info['attention_type']}")
-    print(f"FFN Type:          {info['ffn_type']}")
-    print("-" * 60)
-    print(f"Estimated Params:  {info['estimated_params']:,}")
-    print(f"Trainable Params:  {info['trainable_params']:,}")
-    print(f"Total Params:      {info['total_params']:,}")
-    print(f"Model Size:        {info['model_size_mb']:.2f} MB (float32)")
-    print(f"Estimated MACs:    {info['estimated_macs_m']:.1f} M")
-    print("=" * 60)
+    lines = [
+        "=" * 60,
+        "CryTransformer Model Summary",
+        "=" * 60,
+        f"Variant:           {info['variant']}",
+        f"Size Category:     {info['size_category']}",
+        f"Model Dimension:   {info['d_model']}",
+        f"Attention Heads:   {info['n_heads']}",
+        f"Encoder Layers:    {info['n_layers']}",
+        f"FFN Dimension:     {info['d_ff']}",
+        f"Attention Type:    {info['attention_type']}",
+        f"FFN Type:          {info['ffn_type']}",
+        "-" * 60,
+        f"Estimated Params:  {info['estimated_params']:,}",
+        f"Trainable Params:  {info['trainable_params']:,}",
+        f"Total Params:      {info['total_params']:,}",
+        f"Model Size:        {info['model_size_mb']:.2f} MB (float32)",
+        f"Estimated MACs:    {info['estimated_macs_m']:.1f} M",
+        "=" * 60,
+    ]
+    return "\n".join(lines)
+
+
+def print_model_summary(model: CryTransformer):
+    """Print a summary of the model using logging"""
+    summary = get_model_summary(model)
+    logging.info("\n" + summary)

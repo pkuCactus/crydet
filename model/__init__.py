@@ -10,7 +10,7 @@ Supports multiple model variants for different deployment scenarios:
 from .transformer import CryTransformer
 from .variants import (
     create_model, create_model_from_variant,
-    list_models, get_model_info, print_model_summary,
+    list_models, get_model_info, print_model_summary, get_model_summary,
     MODEL_CONFIGS
 )
 from .loss import (
@@ -31,7 +31,7 @@ from .distributed import (
 __all__ = [
     'CryTransformer',
     'create_model', 'create_model_from_variant',
-    'list_models', 'get_model_info', 'print_model_summary',
+    'list_models', 'get_model_info', 'print_model_summary', 'get_model_summary',
     'MODEL_CONFIGS',
     'FocalLoss', 'LabelSmoothingCrossEntropy', 'CombinedLoss', 'OHEMLoss', 'create_loss',
     'ExponentialMovingAverage',

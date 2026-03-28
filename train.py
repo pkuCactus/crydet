@@ -49,7 +49,7 @@ from dataset.dataset import CryDataset
 from dataset.dataloader import collate_fn, worker_init_fn, load_data_dict
 from dataset.feature import FeatureExtractor
 from dataset.sampler import CrySampler, DistributedCrySampler, SequentialCrySampler
-from model import create_model, print_model_summary
+from model import create_model, get_model_summary
 from model.ema import ExponentialMovingAverage
 from model.loss import create_loss
 from model.scheduler import WarmupCosineScheduler
@@ -114,6 +114,28 @@ class Trainer:
         self.log_dir = log_dir
         self.feature_extractor = feature_extractor
 
+        # Initialize logger early for torch.compile messages
+        self.logger = get_logger(__name__)
+
+        # Compile feature extractor with torch.compile (if available and not already compiled)
+        if (feature_extractor is not None and
+            device.type == 'cuda' and
+            hasattr(torch, 'compile') and
+            not hasattr(feature_extractor, '_compiled')):
+            try:
+                self.feature_extractor = torch.compile(
+                    feature_extractor,
+                    mode="reduce-overhead",
+                    fullgraph=False,
+                    dynamic=True
+                )
+                self.feature_extractor._compiled = True
+                if rank == 0:
+                    self.logger.info("FeatureExtractor compiled with torch.compile")
+            except Exception as e:
+                if rank == 0:
+                    self.logger.warning(f"torch.compile failed for FeatureExtractor: {e}, using eager mode")
+
         model = model.to(device)
         self.raw_model = model
         self.model = DDP(model, device_ids=[rank], output_device=rank) if self.is_distributed else model
@@ -160,7 +182,7 @@ class Trainer:
         self.scaler = torch.amp.GradScaler() if device.type == 'cuda' else None
 
         # Use root logger (configured in main) - inherits handlers from root
-        self.logger = get_logger(__name__)
+        # Logger was already set up earlier in __init__
 
         # Load checkpoint if provided (handles model weights and training state)
         if checkpoint_path is not None:
@@ -333,22 +355,17 @@ class Trainer:
         return self.feature_extractor(waveforms)
 
     def _train_epoch(self, log_interval: int = 10) -> Dict[str, float]:
-        """Train one epoch with periodic logging instead of tqdm."""
+        """Train one epoch."""
         self.model.train()
+
+        # 设置特征提取器模式
         if self.feature_extractor is not None:
-            # Check if mask should be enabled based on epoch range
             mask_config = self.config.feature.mask
             current = self.current_epoch
             start = mask_config.start_epoch
             end = mask_config.end_epoch
-
-            # Enable mask when: start_epoch <= current < end_epoch (or end < 0 means no end)
             mask_enabled = mask_config.enable and current >= start and (end < 0 or current < end)
-
-            if mask_enabled:
-                self.feature_extractor.train()  # Enable DropBlock
-            else:
-                self.feature_extractor.eval()   # Disable DropBlock
+            self.feature_extractor.train(mask_enabled)
 
         if hasattr(self.train_loader.sampler, 'set_epoch'):
             self.train_loader.sampler.set_epoch(self.current_epoch)
@@ -362,12 +379,12 @@ class Trainer:
             start_time.record()
 
         for batch_idx, (waveforms, targets) in enumerate(self.train_loader):
-            # Step step-based scheduler at the beginning of each batch
-            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.scheduler.warmup_steps > 0:
-                self.scheduler.step(step=self.global_step)
-
+            # 提取特征并训练
             features = self._extract_features(waveforms)
             targets = targets.to(self.device, non_blocking=True)
+
+            if isinstance(self.scheduler, WarmupCosineScheduler) and self.train_cfg.scheduler.warmup_steps > 0:
+                self.scheduler.step(step=self.global_step)
 
             outputs, loss = self._forward_backward_step(features, targets)
 
@@ -400,7 +417,6 @@ class Trainer:
                     f"LR: {lr:.6f}{throughput_info}"
                 )
 
-            # TensorBoard logging
             if self.writer and self.global_step % self.train_cfg.log_interval == 0:
                 self.writer.add_scalar('train/loss_step', unscaled_loss, self.global_step)
                 self.writer.add_scalar('train/acc_step', correct/total, self.global_step)
@@ -422,7 +438,6 @@ class Trainer:
             precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
             recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
 
-            # Log class distribution for diagnosis
             if self.rank == 0 and self.current_epoch % 5 == 0:
                 target_counts = Counter(all_targets)
                 pred_counts = Counter(all_preds)
@@ -447,16 +462,10 @@ class Trainer:
 
     @torch.no_grad()
     def _validate(self, log_interval: int = 10, use_ema: bool = True) -> Dict[str, float]:
-        """Validate on validation set with periodic logging.
-
-        Args:
-            log_interval: Logging interval in batches
-            use_ema: Whether to use EMA model for validation (if available)
-        """
+        """Validate on validation set."""
         if self.val_loader is None:
             return {}
 
-        # Apply EMA shadow parameters if enabled
         ema_active = use_ema and self.ema is not None
         if ema_active:
             self.ema.apply_shadow(self.raw_model)
@@ -464,7 +473,7 @@ class Trainer:
         try:
             self.model.eval()
             if self.feature_extractor is not None:
-                self.feature_extractor.eval()  # Disable DropBlock during validation
+                self.feature_extractor.eval()
 
             total_loss = 0.0
             correct = 0
@@ -472,8 +481,6 @@ class Trainer:
             all_preds = []
             all_targets = []
             all_probs = []
-
-            num_batches = len(self.val_loader)
 
             for batch_idx, (waveforms, targets) in enumerate(self.val_loader):
                 features = self._extract_features(waveforms)
@@ -497,18 +504,16 @@ class Trainer:
                     current_loss = total_loss / (batch_idx + 1)
                     current_acc = 100. * correct / total
                     self.logger.info(
-                        f"Validation Batch [{batch_idx + 1}/{num_batches}] "
+                        f"Validation Batch [{batch_idx + 1}/{len(self.val_loader)}] "
                         f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%"
                     )
 
             if self.is_distributed:
-                # Gather num_batches from all ranks for correct loss averaging
                 local_batches = len(self.val_loader)
                 batches_tensor = torch.tensor([local_batches], dtype=torch.long, device=self.device)
                 dist.all_reduce(batches_tensor, op=dist.ReduceOp.SUM)
                 total_batches = int(batches_tensor.item())
 
-                # Create tensor on CPU then move to device to avoid NCCL issue
                 metrics = torch.tensor([total_loss, correct, total])
                 if self.device.type == 'cuda':
                     metrics = metrics.cuda(self.device)
@@ -536,7 +541,6 @@ class Trainer:
                     auc = 0.5
 
         finally:
-            # Always restore original parameters after validation
             if ema_active:
                 self.ema.restore(self.raw_model)
 
@@ -631,6 +635,8 @@ class Trainer:
         self.logger.info(f"Total epochs: {total_epochs}, start epoch: {start_epoch}")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Distributed: {self.is_distributed} (world_size={self.world_size})")
+        if hasattr(self.feature_extractor, '_compiled'):
+            self.logger.info("Feature extractor: torch.compile ENABLED")
 
         eta_tracker = ETATracker(window_size=5)
 
@@ -906,7 +912,7 @@ def main():
         )
 
         if rank == 0:
-            print_model_summary(model)
+            logger.info("Model architecture summary:\n" + get_model_summary(model))
 
         # Create feature extractor with sample_rate and move to device
         feature_extractor = FeatureExtractor(config.feature, sr=config.dataset.sample_rate).to(device)
