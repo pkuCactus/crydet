@@ -327,7 +327,9 @@ class Trainer:
     def _extract_features(self, waveforms: torch.Tensor) -> torch.Tensor:
         """Extract features from waveforms if feature extractor is configured."""
         if self.feature_extractor is None:
-            return waveforms
+            return waveforms.to(self.device, non_blocking=True)
+        # Move waveforms to device before feature extraction
+        waveforms = waveforms.to(self.device, non_blocking=True)
         return self.feature_extractor(waveforms)
 
     def _train_epoch(self, log_interval: int = 10) -> Dict[str, float]:
@@ -475,7 +477,6 @@ class Trainer:
 
             for batch_idx, (waveforms, targets) in enumerate(self.val_loader):
                 features = self._extract_features(waveforms)
-                features = features.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
 
                 outputs = self.model(features)
