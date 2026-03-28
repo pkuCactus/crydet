@@ -26,7 +26,6 @@ import os
 import random
 import sys
 import time
-from collections import Counter
 from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
@@ -371,12 +370,15 @@ class Trainer:
             self.train_loader.sampler.set_epoch(self.current_epoch)
 
         total_loss = correct = total = 0
-        all_preds, all_targets = [], []
+        # 使用预分配的张量列表避免频繁CPU同步
+        local_preds, local_targets = [], []
         num_batches = len(self.train_loader)
 
-        start_time = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
-        if start_time:
-            start_time.record()
+        # 使用CUDA事件进行异步计时，避免同步开销
+        start_event = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
+        end_event = torch.cuda.Event(enable_timing=True) if self.device.type == 'cuda' else None
+        if start_event:
+            start_event.record()
 
         for batch_idx, (waveforms, targets) in enumerate(self.train_loader):
             # 提取特征并训练
@@ -388,27 +390,32 @@ class Trainer:
 
             outputs, loss = self._forward_backward_step(features, targets)
 
+            # 异步获取结果，减少同步点
             with torch.no_grad():
-                unscaled_loss = loss.item() * self.world_size
+                unscaled_loss = loss.item() * self.world_size  # 必须同步获取loss
                 total_loss += unscaled_loss
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
-                all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
+                # 延迟CPU转换，累积在GPU
+                local_preds.append(predicted)
+                local_targets.append(targets)
 
+            # 日志记录（减少同步频率）
             if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
                 current_loss = total_loss / (batch_idx + 1)
                 current_acc = 100. * correct / total
 
                 throughput_info = ""
-                if start_time:
-                    end_time = torch.cuda.Event(enable_timing=True)
-                    end_time.record()
-                    torch.cuda.synchronize()
-                    elapsed_s = start_time.elapsed_time(end_time) / 1000
+                if start_event and end_event:
+                    end_event.record()
+                    # 非阻塞计算时间
+                    elapsed_ms = start_event.elapsed_time(end_event)
+                    elapsed_s = elapsed_ms / 1000
                     samples_per_sec = (batch_idx + 1) * self.train_cfg.batch_size / elapsed_s
                     throughput_info = f", {samples_per_sec:.1f} samples/s"
+                    # 重置开始事件
+                    start_event.record()
 
                 lr = self.optimizer.param_groups[0]['lr']
                 self.logger.info(
@@ -424,28 +431,101 @@ class Trainer:
 
             self.global_step += 1
 
+        # 在epoch结束时一次性聚合metrics（减少同步次数）
         total_loss, correct, total = self._aggregate_metrics(total_loss, correct, total)
 
         epoch_loss = total_loss / (len(self.train_loader) * self.world_size)
         epoch_acc = correct / total
 
+        # 只在需要F1计算时才gather预测结果
         if self.is_distributed:
-            all_preds = self._gather_lists(all_preds)
-            all_targets = self._gather_lists(all_targets)
-
-        if all_targets and all_preds:
-            f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-            precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
-            recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
-
-            if self.rank == 0 and self.current_epoch % 5 == 0:
-                target_counts = Counter(all_targets)
-                pred_counts = Counter(all_preds)
-                self.logger.info(f"Class distribution - Targets: {dict(target_counts)}, Predictions: {dict(pred_counts)}")
+            # 使用更高效的all_reduce计算F1，而不是gather所有预测
+            precision, recall, f1 = self._compute_f1_distributed(local_preds, local_targets)
         else:
             f1 = precision = recall = 0.0
+            # 单卡模式：直接计算
+            all_preds = torch.cat(local_preds).cpu().numpy()
+            all_targets = torch.cat(local_targets).cpu().numpy()
+            if len(all_targets) > 0:
+                f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+                precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+                recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
 
         return {'loss': epoch_loss, 'accuracy': epoch_acc, 'f1': f1, 'precision': precision, 'recall': recall}
+
+    def _compute_f1_distributed(self, local_preds: list, local_targets: list) -> tuple[float, float, float]:
+        """使用all_reduce计算F1，避免gather所有数据，返回(precision, recall, f1)"""
+        if not local_preds:
+            return 0.0, 0.0, 0.0
+
+        # 在GPU上拼接
+        preds_tensor = torch.cat(local_preds)
+        targets_tensor = torch.cat(local_targets)
+
+        # 计算混淆矩阵元素（GPU上）
+        tp = ((preds_tensor == 1) & (targets_tensor == 1)).sum().float()
+        fp = ((preds_tensor == 1) & (targets_tensor == 0)).sum().float()
+        fn = ((preds_tensor == 0) & (targets_tensor == 1)).sum().float()
+
+        # 聚合到所有rank
+        metrics = torch.stack([tp, fp, fn])
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+
+        tp, fp, fn = metrics[0].item(), metrics[1].item(), metrics[2].item()
+
+        precision_val = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall_val = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1_val = 2 * precision_val * recall_val / (precision_val + recall_val) if (precision_val + recall_val) > 0 else 0.0
+
+        return precision_val, recall_val, f1_val
+
+    def _compute_auc_distributed(self, local_probs: list, local_targets: list) -> float:
+        """使用all_gather计算AUC，收集所有rank的预测概率和标签"""
+        if not local_probs:
+            return 0.5
+
+        # 在GPU上拼接
+        probs_tensor = torch.cat(local_probs)
+        targets_tensor = torch.cat(local_targets)
+
+        # 收集所有rank的数据
+        if self.is_distributed:
+            # 获取每个rank的数据量
+            local_size = torch.tensor([probs_tensor.size(0)], dtype=torch.long, device=self.device)
+            all_sizes = [torch.zeros(1, dtype=torch.long, device=self.device) for _ in range(self.world_size)]
+            dist.all_gather(all_sizes, local_size)
+
+            # 创建gather列表
+            all_probs = [torch.zeros(size.item(), dtype=probs_tensor.dtype, device=self.device) for size in all_sizes]
+            all_targets = [torch.zeros(size.item(), dtype=targets_tensor.dtype, device=self.device) for size in all_sizes]
+
+            # 收集数据
+            dist.all_gather(all_probs, probs_tensor)
+            dist.all_gather(all_targets, targets_tensor)
+
+            # 在rank 0上计算AUC
+            if self.rank == 0:
+                all_probs_cat = torch.cat(all_probs).cpu().numpy()
+                all_targets_cat = torch.cat(all_targets).cpu().numpy()
+                try:
+                    auc = roc_auc_score(all_targets_cat, all_probs_cat)
+                except Exception:
+                    auc = 0.5
+            else:
+                auc = 0.5
+
+            # 广播AUC到所有rank
+            auc_tensor = torch.tensor([auc], dtype=torch.float32, device=self.device)
+            dist.broadcast(auc_tensor, src=0)
+            return auc_tensor.item()
+        else:
+            # 单卡模式
+            all_probs = probs_tensor.cpu().numpy()
+            all_targets = targets_tensor.cpu().numpy()
+            try:
+                return roc_auc_score(all_targets, all_probs)
+            except Exception:
+                return 0.5
 
     def _gather_lists(self, local_list: list) -> list:
         """Gather lists from all ranks using all_gather_object."""
@@ -478,9 +558,8 @@ class Trainer:
             total_loss = 0.0
             correct = 0
             total = 0
-            all_preds = []
-            all_targets = []
-            all_probs = []
+            # 累积GPU张量，减少CPU同步
+            local_preds, local_targets, local_probs = [], [], []
 
             for batch_idx, (waveforms, targets) in enumerate(self.val_loader):
                 features = self._extract_features(waveforms)
@@ -496,9 +575,10 @@ class Trainer:
 
                 probs = F.softmax(outputs, dim=1)[:, 1]
 
-                all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
+                # 延迟CPU转换
+                local_preds.append(predicted)
+                local_targets.append(targets)
+                local_probs.append(probs)
 
                 if self.rank == 0 and (batch_idx + 1) % log_interval == 0:
                     current_loss = total_loss / (batch_idx + 1)
@@ -508,6 +588,7 @@ class Trainer:
                         f"Loss: {loss.item():.4f} (avg: {current_loss:.4f}), Acc: {current_acc:.2f}%"
                     )
 
+            # 聚合metrics
             if self.is_distributed:
                 local_batches = len(self.val_loader)
                 batches_tensor = torch.tensor([local_batches], dtype=torch.long, device=self.device)
@@ -520,25 +601,27 @@ class Trainer:
                 dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
                 total_loss, correct, total = metrics[0].item(), int(metrics[1].item()), int(metrics[2].item())
 
-                all_preds = self._gather_lists(all_preds)
-                all_targets = self._gather_lists(all_targets)
-                all_probs = self._gather_lists(all_probs)
+                # 使用分布式F1计算
+                precision, recall, f1 = self._compute_f1_distributed(local_preds, local_targets)
+                # 计算分布式AUC
+                auc = self._compute_auc_distributed(local_probs, local_targets)
             else:
                 total_batches = len(self.val_loader)
+                # 单卡：拼接后转CPU计算
+                all_preds = torch.cat(local_preds).cpu().numpy()
+                all_targets = torch.cat(local_targets).cpu().numpy()
+                all_probs = torch.cat(local_probs).cpu().numpy()
+
+                f1 = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+                recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+                precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+                try:
+                    auc = roc_auc_score(all_targets, all_probs)
+                except Exception:
+                    auc = 0.5
 
             val_loss = total_loss / max(total_batches, 1)
             val_acc = correct / max(total, 1)
-
-            f1 = precision = recall = auc = 0.0
-            if all_targets and all_preds:
-                try:
-                    f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
-                    precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
-                    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
-                    auc = roc_auc_score(all_targets, all_probs)
-                except Exception as e:
-                    self.logger.warning(f"Failed to compute metrics: {e}")
-                    auc = 0.5
 
         finally:
             if ema_active:
