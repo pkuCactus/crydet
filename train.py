@@ -45,9 +45,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.config import Config, load_config, save_config
 from dataset.dataset import CryDataset
 from dataset.dataloader import collate_fn, worker_init_fn, load_data_dict
+from dataset.feature import FeatureExtractor
 from dataset.sampler import CrySampler, DistributedCrySampler, SequentialCrySampler
 from model import create_model, print_model_summary
 from model.ema import ExponentialMovingAverage
@@ -55,6 +55,7 @@ from model.loss import create_loss
 from model.scheduler import WarmupCosineScheduler
 from model.distributed import setup_distributed, cleanup_distributed
 from utils import setup_logger, setup_file_logger, get_logger
+from utils.config import Config, load_config, save_config
 
 
 def format_duration(seconds: float) -> str:
@@ -364,7 +365,6 @@ class Trainer:
                 self.scheduler.step(step=self.global_step)
 
             features = self._extract_features(waveforms)
-            features = features.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
 
             outputs, loss = self._forward_backward_step(features, targets)
@@ -908,7 +908,6 @@ def main():
             print_model_summary(model)
 
         # Create feature extractor with sample_rate and move to device
-        from dataset.feature import FeatureExtractor
         feature_extractor = FeatureExtractor(config.feature, sr=config.dataset.sample_rate).to(device)
 
         # Synchronize before training to ensure all ranks are ready
