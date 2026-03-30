@@ -409,7 +409,7 @@ class Trainer:
                 throughput_info = ""
                 if start_event and end_event:
                     end_event.record()
-                    # 非阻塞计算时间
+                    torch.cuda.synchronize()
                     elapsed_ms = start_event.elapsed_time(end_event)
                     elapsed_s = elapsed_ms / 1000
                     samples_per_sec = (batch_idx + 1) * self.train_cfg.batch_size / elapsed_s
