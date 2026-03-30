@@ -484,29 +484,34 @@ class Trainer:
         if not local_probs:
             return 0.5
 
-        # 在GPU上拼接
+        # 在GPU上拼接本地数据
         probs_tensor = torch.cat(local_probs)
         targets_tensor = torch.cat(local_targets)
 
         # 收集所有rank的数据
         if self.is_distributed:
-            # 获取每个rank的数据量
+            # 收集每个rank的数据量
             local_size = torch.tensor([probs_tensor.size(0)], dtype=torch.long, device=self.device)
             all_sizes = [torch.zeros(1, dtype=torch.long, device=self.device) for _ in range(self.world_size)]
             dist.all_gather(all_sizes, local_size)
 
-            # 创建gather列表
-            all_probs = [torch.zeros(size.item(), dtype=probs_tensor.dtype, device=self.device) for size in all_sizes]
-            all_targets = [torch.zeros(size.item(), dtype=targets_tensor.dtype, device=self.device) for size in all_sizes]
+            # 确保同步完成后再访问数据
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
 
-            # 收集数据
-            dist.all_gather(all_probs, probs_tensor)
-            dist.all_gather(all_targets, targets_tensor)
+            # 收集所有数据到列表
+            all_probs_tensors = [torch.zeros(size.item(), dtype=probs_tensor.dtype, device=self.device)
+                                  for size in all_sizes]
+            all_targets_tensors = [torch.zeros(size.item(), dtype=targets_tensor.dtype, device=self.device)
+                                    for size in all_sizes]
+
+            dist.all_gather(all_probs_tensors, probs_tensor)
+            dist.all_gather(all_targets_tensors, targets_tensor)
 
             # 在rank 0上计算AUC
             if self.rank == 0:
-                all_probs_cat = torch.cat(all_probs).cpu().numpy()
-                all_targets_cat = torch.cat(all_targets).cpu().numpy()
+                all_probs_cat = torch.cat(all_probs_tensors).cpu().numpy()
+                all_targets_cat = torch.cat(all_targets_tensors).cpu().numpy()
                 try:
                     auc = roc_auc_score(all_targets_cat, all_probs_cat)
                 except Exception:
