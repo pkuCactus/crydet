@@ -13,7 +13,9 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -31,6 +33,45 @@ from utils.logger import setup_logger, setup_file_logger
 
 # Initialize logger using utils.logger setup
 LOGGER = setup_logger(rank=0, name=__name__)
+
+
+def extract_audio_from_video(video_path: str, output_path: str, sample_rate: int = 16000) -> bool:
+    """
+    Extract audio from video file using ffmpeg.
+
+    Args:
+        video_path: Path to video file (mp4, avi, mov, etc.)
+        output_path: Path to output audio file (wav)
+        sample_rate: Target sample rate for extracted audio
+
+    Returns:
+        True if extraction succeeded, False otherwise
+    """
+    try:
+        cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file if exists
+            '-i', video_path,  # Input file
+            '-vn',  # No video
+            '-acodec', 'pcm_s16le',  # PCM 16-bit little-endian
+            '-ar', str(sample_rate),  # Sample rate
+            '-ac', '1',  # Mono
+            output_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        LOGGER.error(f"Failed to extract audio from {video_path}: {e.stderr}")
+        return False
+    except FileNotFoundError:
+        LOGGER.error("ffmpeg not found. Please install ffmpeg to process video files.")
+        return False
+
+
+def is_video_file(path: str) -> bool:
+    """Check if file is a video file based on extension."""
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm'}
+    return Path(path).suffix.lower() in video_extensions
 
 
 class CryDetector:
@@ -134,18 +175,32 @@ class CryDetector:
     @torch.no_grad()
     def predict_file(self, audio_path: str, sliding_window: bool = True) -> Union[Dict, List[Dict]]:
         """
-        Predict on an audio file.
+        Predict on an audio file or video file.
 
         Args:
-            audio_path: Path to audio file
+            audio_path: Path to audio file (wav, mp3, etc.) or video file (mp4, avi, etc.)
             sliding_window: Whether to use sliding window for long audio (default: True)
 
         Returns:
             If sliding_window=False: Single prediction dict
             If sliding_window=True: List of prediction dicts for each window
         """
-        # Load audio
-        waveform, sr = self.audio_reader.load(audio_path)
+        # Check if input is a video file
+        if is_video_file(audio_path):
+            LOGGER.info(f"Detected video file: {audio_path}, extracting audio...")
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+            try:
+                if not extract_audio_from_video(audio_path, tmp_path, self.sample_rate):
+                    raise RuntimeError(f"Failed to extract audio from video: {audio_path}")
+                waveform, sr = self.audio_reader.load(tmp_path)
+            finally:
+                # Clean up temp file
+                Path(tmp_path).unlink(missing_ok=True)
+        else:
+            # Load audio directly
+            waveform, sr = self.audio_reader.load(audio_path)
+
         duration = len(waveform) / sr
 
         LOGGER.debug(f"Audio loaded: {duration:.2f}s, sr={sr}")
@@ -346,16 +401,16 @@ def main():
 
             results['prediction'] = result
 
-    def _get_audio_files(path: str) -> List[str]:
-        """Get list of audio files from path (file or directory)."""
+    def _get_media_files(path: str) -> List[str]:
+        """Get list of audio/video files from path (file or directory)."""
         path_obj = Path(path)
         if path_obj.is_file():
             return [str(path_obj)]
         elif path_obj.is_dir():
-            # Recursively find all audio files
-            audio_exts = {'.wav', '.mp3', '.flac', '.ogg', '.m4a'}
+            # Recursively find all audio and video files
+            media_exts = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.mp4', '.avi', '.mov', '.mkv', '.webm'}
             files = []
-            for ext in audio_exts:
+            for ext in media_exts:
                 files.extend(path_obj.glob(f'**/*{ext}'))
             return sorted([str(f) for f in files])
         return []
@@ -379,7 +434,7 @@ def main():
             # Expand directories to files
             all_files = []
             for path in paths:
-                all_files.extend(_get_audio_files(path))
+                all_files.extend(_get_media_files(path))
 
             LOGGER.info(f"Processing {len(all_files)} files for label: {label}")
 
