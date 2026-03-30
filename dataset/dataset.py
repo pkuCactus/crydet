@@ -8,6 +8,7 @@ import os
 import pickle
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -43,6 +44,34 @@ def compute_energy_db(waveform: np.ndarray) -> float:
     return float(db)
 
 
+def load_exclude_list(exclude_file: str) -> set:
+    """
+    Load exclude list from file.
+
+    Args:
+        exclude_file: Path to exclude file (e.g., audio_list/exclude_audios.txt)
+
+    Returns:
+        Set of excluded file paths
+    """
+    excluded = set()
+    if not os.path.exists(exclude_file):
+        return excluded
+
+    with open(exclude_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+            # Handle both formats: just path, or path with duration
+            parts = line.split('\t')
+            excluded.add(parts[0])
+
+    LOGGER.info(f"Loaded {len(excluded)} excluded files from {exclude_file}")
+    return excluded
+
+
 class CryDataset(Dataset):
     """
     Dataset for baby cry detection with low-energy cry filtering
@@ -59,6 +88,7 @@ class CryDataset(Dataset):
         cry_min_energy_db: float = -40.0,
         memory_cache_mb: float = 500,
         memory_cache_size: int = 100,
+        exclude_file: Optional[str] = None,
     ):
         self.audio_reader = AudioReader(
             target_sr=config.sample_rate,
@@ -70,6 +100,16 @@ class CryDataset(Dataset):
         self.config = config
         self.data_dict = data_dict
         self.cry_min_energy_db = cry_min_energy_db
+
+        # Load exclude list if provided
+        self.excluded_files: set = set()
+        if exclude_file is not None and os.path.exists(exclude_file):
+            self.excluded_files = load_exclude_list(exclude_file)
+        elif exclude_file is None:
+            # Try default location: audio_list/exclude_audios.txt
+            default_exclude = Path("audio_list/exclude_audios.txt")
+            if default_exclude.exists():
+                self.excluded_files = load_exclude_list(str(default_exclude))
 
         # Initialize augmenter if config provided
         self.augmenter: Optional[AudioAugmenter] = None
@@ -239,9 +279,17 @@ class CryDataset(Dataset):
             for file in sorted(files):
                 if not file.lower().endswith(self.config.audio_suffixes):
                     continue
-                audio_files.append(os.path.join(root, file))
+                file_path = os.path.join(root, file)
+                # Skip excluded files
+                if file_path in self.excluded_files:
+                    LOGGER.debug(f"Skipping excluded file: {file_path}")
+                    continue
+                audio_files.append(file_path)
 
-        LOGGER.info(f"Found {len(audio_files)} audio files, reading metadata...")
+        if self.excluded_files:
+            LOGGER.info(f"Found {len(audio_files)} audio files (excluded {len(self.excluded_files)} files)")
+        else:
+            LOGGER.info(f"Found {len(audio_files)} audio files, reading metadata...")
 
         # Parallel processing for faster metadata reading
         file_infos = self._parallel_get_durations(audio_files)
