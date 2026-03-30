@@ -454,83 +454,55 @@ class Trainer:
         return {'loss': epoch_loss, 'accuracy': epoch_acc, 'f1': f1, 'precision': precision, 'recall': recall}
 
     def _compute_f1_distributed(self, local_preds: list, local_targets: list) -> tuple[float, float, float]:
-        """使用all_reduce计算F1，避免gather所有数据，返回(precision, recall, f1)"""
+        """使用all_gather计算F1，避免all_reduce与CUDA graph冲突，返回(precision, recall, f1)"""
         if not local_preds:
             return 0.0, 0.0, 0.0
 
-        # 在GPU上拼接
-        preds_tensor = torch.cat(local_preds)
-        targets_tensor = torch.cat(local_targets)
+        # 在GPU上拼接后转移到CPU，避免CUDA graph捕获同步操作
+        preds_tensor = torch.cat(local_preds).cpu()
+        targets_tensor = torch.cat(local_targets).cpu()
 
-        # 计算混淆矩阵元素（GPU上）
-        tp = ((preds_tensor == 1) & (targets_tensor == 1)).sum().float()
-        fp = ((preds_tensor == 1) & (targets_tensor == 0)).sum().float()
-        fn = ((preds_tensor == 0) & (targets_tensor == 1)).sum().float()
+        # 使用all_gather_object收集所有rank的CPU数据（避免GPU同步）
+        all_preds = self._gather_lists(preds_tensor.tolist())
+        all_targets = self._gather_lists(targets_tensor.tolist())
 
-        # 聚合到所有rank
-        metrics = torch.stack([tp, fp, fn])
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        if not all_targets or not all_preds:
+            return 0.0, 0.0, 0.0
 
-        tp, fp, fn = metrics[0].item(), metrics[1].item(), metrics[2].item()
+        # 在CPU上计算F1
+        from sklearn.metrics import f1_score, precision_score, recall_score
+        f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+        precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+        recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
 
-        precision_val = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall_val = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1_val = 2 * precision_val * recall_val / (precision_val + recall_val) if (precision_val + recall_val) > 0 else 0.0
-
-        return precision_val, recall_val, f1_val
+        return precision, recall, f1
 
     def _compute_auc_distributed(self, local_probs: list, local_targets: list) -> float:
-        """使用all_gather计算AUC，收集所有rank的预测概率和标签"""
+        """使用all_gather计算AUC，先转移数据到CPU避免CUDA graph捕获同步操作"""
         if not local_probs:
             return 0.5
 
-        # 在GPU上拼接本地数据
-        probs_tensor = torch.cat(local_probs)
-        targets_tensor = torch.cat(local_targets)
+        # 先转移到CPU，避免GPU同步操作被CUDA graph捕获
+        probs_tensor = torch.cat(local_probs).cpu()
+        targets_tensor = torch.cat(local_targets).cpu()
 
-        # 收集所有rank的数据
-        if self.is_distributed:
-            # 收集每个rank的数据量
-            local_size = torch.tensor([probs_tensor.size(0)], dtype=torch.long, device=self.device)
-            all_sizes = [torch.zeros(1, dtype=torch.long, device=self.device) for _ in range(self.world_size)]
-            dist.all_gather(all_sizes, local_size)
+        # 使用all_gather_object收集所有rank的CPU数据
+        all_probs = self._gather_lists(probs_tensor.tolist())
+        all_targets = self._gather_lists(targets_tensor.tolist())
 
-            # 确保同步完成后再访问数据
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()
-
-            # 收集所有数据到列表
-            all_probs_tensors = [torch.zeros(size.item(), dtype=probs_tensor.dtype, device=self.device)
-                                  for size in all_sizes]
-            all_targets_tensors = [torch.zeros(size.item(), dtype=targets_tensor.dtype, device=self.device)
-                                    for size in all_sizes]
-
-            dist.all_gather(all_probs_tensors, probs_tensor)
-            dist.all_gather(all_targets_tensors, targets_tensor)
-
-            # 在rank 0上计算AUC
-            if self.rank == 0:
-                all_probs_cat = torch.cat(all_probs_tensors).cpu().numpy()
-                all_targets_cat = torch.cat(all_targets_tensors).cpu().numpy()
-                try:
-                    auc = roc_auc_score(all_targets_cat, all_probs_cat)
-                except Exception:
-                    auc = 0.5
-            else:
-                auc = 0.5
-
-            # 广播AUC到所有rank
-            auc_tensor = torch.tensor([auc], dtype=torch.float32, device=self.device)
-            dist.broadcast(auc_tensor, src=0)
-            return auc_tensor.item()
-        else:
-            # 单卡模式
-            all_probs = probs_tensor.cpu().numpy()
-            all_targets = targets_tensor.cpu().numpy()
+        # 在rank 0上计算AUC（CPU计算，避免GPU同步）
+        if self.rank == 0:
             try:
-                return roc_auc_score(all_targets, all_probs)
+                auc = roc_auc_score(all_targets, all_probs)
             except Exception:
-                return 0.5
+                auc = 0.5
+        else:
+            auc = 0.5
+
+        # 广播AUC到所有rank
+        auc_tensor = torch.tensor([auc], dtype=torch.float32, device=self.device)
+        dist.broadcast(auc_tensor, src=0)
+        return auc_tensor.item()
 
     def _gather_lists(self, local_list: list) -> list:
         """Gather lists from all ranks using all_gather_object."""
