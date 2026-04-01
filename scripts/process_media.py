@@ -388,7 +388,7 @@ def main():
     parser.add_argument('--undo', action='store_true',
                         help='Undo operations from log file')
     parser.add_argument('--log-file', '-l', type=str, default=None,
-                        help='Operation log file (default: output_dir/.operation_log.json)')
+                        help='Operation log file (default: output_dir/.operation_log_YYYYMMDD_HHMMSS.json)')
 
     args = parser.parse_args()
 
@@ -420,11 +420,12 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 设置日志文件路径
+    # 设置日志文件路径（带时间戳防止覆盖）
     if args.log_file:
         log_file = Path(args.log_file)
     else:
-        log_file = output_dir / ".operation_log.json"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = output_dir / f".operation_log_{timestamp}.json"
 
     logger = OperationLogger(log_file)
 
