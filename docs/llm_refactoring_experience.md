@@ -24,13 +24,13 @@ CryDet是一个婴儿啼哭检测系统，用Transformer对音频做二分类。
 编写CryTransformer模型时，先完成设计文档docs/transformer_cry_detection_design.md，涵盖模型架构、特征方案、训练策略。然后将其作为输入，让Claude Code基于文档生成代码，同时在prompt中明确约束：
 
 ```
-按照 docs/transformer_cry_detection_design.md 的设计方案，
-实现 CryTransformer 模型、训练脚本、评估脚本和导出脚本。
+按照docs/transformer_cry_detection_design.md的设计方案，
+实现CryTransformer模型、训练脚本、评估脚本和导出脚本。
 注意以下约束：
-- 输入格式是 [B, T, F]，不是图像的 [B, C, H, W]
-- 用 Linear projection，不要用 Conv1d patch embedding
-- T=157 对应 5 秒音频 @ 16kHz，hop_length=512
-- 需要支持 DDP 多卡训练
+- 输入格式是：[B, T, F]，不是图像的：[B, C, H, W]
+- 用Linear projection，不要用Conv1d patch embedding
+- T=157对应5秒音频@16kHz，hop_length=512
+- 需要支持DDP多卡训练
 ```
 
 2026-03-11的21个commit即由此产生。后续还需运行修复边界bug，但骨架一次成型。
@@ -44,12 +44,12 @@ DDP死锁是本项目最难的问题，前后修复4次。首次沟通时仅描�
 第二次沟通改为提供完整上下文：
 
 ```
-训练在验证阶段的 _compute_auc_distributed 函数卡住。
+训练在验证阶段的_compute_auc_distributed函数卡住。
 相关代码：
-- train.py 的分布式验证逻辑（附代码片段）
-- _compute_auc_distributed 函数实现
-- NCCL 日志显示卡在 all_gather 操作
-- 运行环境：4 卡 GPU，PyTorch 2.6，CUDA 12.4
+- train.py的分布式验证逻辑（附代码片段）
+- _compute_auc_distributed函数实现
+- NCCL日志显示卡在all_gather操作
+- 运行环境：4卡GPU，PyTorch 2.6，CUDA 12.4
 
 请分析根因，不要只给表面修复。
 ```
@@ -97,9 +97,9 @@ Claude Code由此分析出三个根因：schedule不一致、all_gather异步操
 train.py（940行）经历多轮简化，每轮只改一个维度：
 
 ```
-03-23 19:01  简化 train.py 代码 → 去重复模式
-03-23 19:15  简化 train.py 中的重复模式 → 提取公共逻辑
-03-23 19:31  将 scheduler.step 移到训练步骤前面 → 修正训练循环语义
+03-23 19:01  简化train.py代码 → 去重复模式
+03-23 19:15  简化train.py中的重复模式 → 提取公共逻辑
+03-23 19:31  将scheduler.step移到训练步骤前面 → 修正训练循环语义
 03-24 09:14  Simplify train.py and restructure configuration → 配置体系重构
 ```
 
@@ -225,12 +225,12 @@ Claude Code曾提议给loss函数增加Strategy模式的抽象基类，便于未
 LLM参与的commit自动附带结构化消息：
 
 ```
-Feat: 重构训练代码架构，新增 EMA、调度器、能量特征等多项功能
+Feat: 重构训练代码架构，新增EMA、调度器、能量特征等多项功能
 
 主要变更：
-1. 模块重构：将 config.py 移动到 utils/config.py
-2. 新增 model/ema.py：指数移动平均实现
-3. 新增 model/scheduler.py：Warmup + Cosine Decay
+1. 模块重构：将config.py移动到utils/config.py
+2. 新增model/ema.py：指数移动平均实现
+3. 新增model/scheduler.py：Warmup + Cosine Decay
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ```
