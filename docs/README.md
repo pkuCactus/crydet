@@ -12,6 +12,7 @@
 | [feature_extraction_flow.md](feature_extraction_flow.md) | 特征提取流程详解 | 算法工程师 |
 | [inference_examples.md](inference_examples.md) | 推理使用指南与示例 | 应用开发者 |
 | [../CLAUDE.md](../CLAUDE.md) | 项目架构与开发规范 | 项目开发者 |
+| [llm_refactoring_experience.md](llm_refactoring_experience.md) | 基于 LLM 的项目重构经验总结 | 所有开发者 |
 
 ## 文档详细说明
 
@@ -42,6 +43,15 @@
    - 处理流程总图
    - 关键参数配置
    - 特征提取完整流程
+
+### 4. LLM 协作经验
+
+如果你想了解基于 LLM 进行项目开发与重构的实践经验：
+
+- **[llm_refactoring_experience.md](llm_refactoring_experience.md)** - LLM 协作重构经验总结
+   - LLM 在项目中的角色定位
+   - 高效协作模式与反模式
+   - 效率量化与最佳实践清单
 
 ### 3. 开发规范
 
@@ -88,6 +98,7 @@ flowchart LR
 |------|----------|
 | 2024-03-13 | 修复所有 Mermaid 图表语法错误 |
 | 2024-03-13 | 创建文档索引 |
+| 2026-05-27 | 新增 LLM 重构经验总结文档 |
 
 ## 贡献指南
 
