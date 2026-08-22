@@ -122,7 +122,7 @@ flowchart TB
 
 ### 背景
 
-原始项目为 TensorFlow + CNN+LSTM 遗留代码：训练逻辑集中于单个过大文件（冗余多、无注释）、历史模型变体繁多。目标：迁移至 PyTorch + Transformer，以支持多端侧平台部署（不同算力/内存档位），同时提升精度/效率、降低维护成本。
+原始项目为 TensorFlow + CNN+LSTM 遗留代码：训练逻辑集中于单个过大文件（冗余多、无注释）、历史模型变体繁多。目标：重构代码结构并演进模型至 Transformer 多档变体（Large/Medium/Tiny/Nano，基于 PyTorch），以支持多端侧平台部署（不同算力/内存档位），同时提升精度/效率、降低维护成本。
 
 ### 重构前后对照
 
@@ -300,7 +300,7 @@ flowchart TB
 重构规划（核心 spec，本项目示例）：
 
 ```
-原始是 TF + CNN+LSTM，冗余多、历史模型多、无版本信息。重构目标：迁移到 PyTorch + Transformer，
+原始是 TF + CNN+LSTM，冗余多、历史模型多、无版本信息。重构目标：重构代码结构并演进模型至 Transformer 多档变体（基于 PyTorch），
 便于多端侧平台部署（不同算力/内存档位）。请产出重构 spec，包含：
 1. 目标架构：Transformer 编码器 + 分类头，输入 [B,T,F]，Linear projection（不用 Conv1d patch embedding），
    模型大小用层参数（d_model/n_layers）控制以适配多档端侧
